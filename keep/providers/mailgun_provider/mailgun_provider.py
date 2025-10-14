@@ -46,6 +46,17 @@ class MailgunProviderAuthConfig:
         },
         default="",
     )
+    api_region: str = dataclasses.field(
+        metadata={
+            "required": False,
+            "description": "Mailgun API region",
+            "hint": "Select 'US' for api.mailgun.net or 'EU' for api.eu.mailgun.net",
+            "sensitive": False,
+            "type": "select",
+            "options": ["US", "EU"],
+        },
+        default="US",
+    )
     extraction: typing.Optional[list[dict[str, str]]] = dataclasses.field(
         default=None,
         metadata={
@@ -75,6 +86,18 @@ class MailgunProvider(BaseProvider):
 
     def dispose(self):
         pass
+
+    def _get_api_url(self) -> str:
+        """
+        Get the Mailgun API base URL based on the configured region.
+        
+        Returns:
+            str: The API base URL (US or EU endpoint)
+        """
+        region = getattr(self.authentication_config, "api_region", "US").upper()
+        if region == "EU":
+            return "https://api.eu.mailgun.net/v3"
+        return "https://api.mailgun.net/v3"
 
     @staticmethod
     def parse_event_raw_body(raw_body: bytes | dict) -> dict:
@@ -207,7 +230,9 @@ class MailgunProvider(BaseProvider):
                 sender = f"{sender}>"
             expression = f'({expression} and match_header("from", "{sender}"))'
 
-        url = "https://api.mailgun.net/v3/routes"
+        # Get the appropriate API URL based on region
+        api_base_url = self._get_api_url()
+        url = f"{api_base_url}/routes"
         payload = {
             "priority": 0,
             "expression": expression,
