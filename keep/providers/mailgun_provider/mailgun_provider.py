@@ -481,7 +481,9 @@ class MailgunProvider(BaseProvider):
                     "subject": event.get("subject")
                 },
             )
-            event = dict(event)
+            # Convert to dict but exclude UploadFile objects (attachments) to avoid workflow serialization errors
+            from starlette.datastructures import UploadFile
+            event = {k: v for k, v in dict(event).items() if not isinstance(v, UploadFile)}
 
             # Classify email type first
             email_type = MailgunProvider._classify_email_type(event)
