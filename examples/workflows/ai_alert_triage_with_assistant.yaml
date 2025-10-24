@@ -1,0 +1,111 @@
+workflow:
+  id: ai-alert-triage-assistant
+  description: Use OpenAI Assistant to triage alerts with knowledge base access
+  triggers:
+    - type: alert
+      filters:
+        - key: source
+          value: ".*"  # All sources
+        - key: severity
+          value: "critical|high"  # Only critical/high severity
+  
+  actions:
+    # Step 1: Analyze the alert using OpenAI Assistant
+    - name: analyze_with_assistant
+      provider:
+        type: openaiassistant
+        config: "{{ providers.my_openai_assistant }}"
+        with:
+          prompt: |
+            Analyze this alert and provide recommendations:
+            
+            Alert Details:
+            - Name: {{ alert.name }}
+            - Message: {{ keep.slice(alert.message, 0, 1000) }}
+            - Severity: {{ alert.severity }}
+            - Source: {{ alert.source }}
+            - Status: {{ alert.status }}
+            
+            Please provide:
+            1. Root cause analysis based on company knowledge base
+            2. Recommended action (escalate, investigate, resolve)
+            3. Severity assessment
+            4. Related incidents or alerts from history
+            
+            Respond in JSON format with keys:
+            - action: "escalate" | "investigate" | "resolve"
+            - reason: string
+            - severity: "critical" | "high" | "medium" | "low"
+            - related_docs: array of relevant documentation links
+          max_wait_time: 60
+          parse_json: true
+    
+    # Step 2: Log the analysis
+    - name: log_analysis
+      provider:
+        type: console
+        with:
+          message: |
+            AI Analysis Complete:
+            Action: {{ steps.analyze_with_assistant.results.response.action }}
+            Reason: {{ steps.analyze_with_assistant.results.response.reason }}
+            Severity: {{ steps.analyze_with_assistant.results.response.severity }}
+    
+    # Step 3: If action is "escalate", notify Slack
+    - name: notify_slack
+      if: "{{ steps.analyze_with_assistant.results.response.action == 'escalate' }}"
+      provider:
+        type: slack
+        config: "{{ providers.slack }}"
+        with:
+          message: |
+            🚨 *ALERT ESCALATION REQUIRED*
+            
+            *Alert:* {{ alert.name }}
+            *Severity:* {{ steps.analyze_with_assistant.results.response.severity | upper }}
+            
+            *AI Analysis:*
+            {{ steps.analyze_with_assistant.results.response.reason }}
+            
+            *Recommended Action:* Escalate immediately
+            
+            *Thread ID:* {{ steps.analyze_with_assistant.results.thread_id }}
+            (Use this to continue conversation with assistant)
+    
+    # Step 4: If action is "resolve", resolve the alert
+    - name: auto_resolve
+      if: "{{ steps.analyze_with_assistant.results.response.action == 'resolve' }}"
+      provider:
+        type: keep
+        config: "{{ providers.keep }}"
+        with:
+          enrich:
+            alert:
+              - key: status
+                value: "resolved"
+              - key: ai_analysis
+                value: "{{ steps.analyze_with_assistant.results.response.reason }}"
+              - key: ai_severity
+                value: "{{ steps.analyze_with_assistant.results.response.severity }}"
+    
+    # Step 5: Ask follow-up question in same thread
+    - name: get_remediation_steps
+      if: "{{ steps.analyze_with_assistant.results.response.action != 'resolve' }}"
+      provider:
+        type: openaiassistant
+        config: "{{ providers.my_openai_assistant }}"
+        with:
+          prompt: "What are the specific remediation steps for this alert?"
+          thread_id: "{{ steps.analyze_with_assistant.results.thread_id }}"
+          max_wait_time: 30
+    
+    # Step 6: Log remediation steps
+    - name: log_remediation
+      if: "{{ steps.get_remediation_steps.results is defined }}"
+      provider:
+        type: console
+        with:
+          message: |
+            Remediation Steps:
+            {{ steps.get_remediation_steps.results.response }}
+

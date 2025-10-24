@@ -1,0 +1,133 @@
+openaiassistant:
+  # Provider display information
+  description: "OpenAI Assistant provider for using OpenAI's Assistants API with Keep"
+  
+  # Authentication configuration
+  authentication:
+    - name: api_key
+      description: "OpenAI Platform API Key"
+      required: true
+      type: "string"
+      sensitive: true
+      hint: "sk-..."
+      
+    - name: organization_id
+      description: "OpenAI Platform Organization ID (optional)"
+      required: false
+      type: "string"
+      sensitive: false
+      hint: "org-..."
+      
+    - name: assistant_id
+      description: "OpenAI Assistant ID"
+      required: true
+      type: "string"
+      sensitive: false
+      hint: "asst_..."
+      validation: "^asst_[a-zA-Z0-9]+$"
+  
+  # Provider capabilities
+  supports:
+    - query
+  
+  # Query method parameters
+  query:
+    parameters:
+      - name: prompt
+        description: "The message to send to the assistant"
+        required: true
+        type: "string"
+        
+      - name: thread_id
+        description: "Thread ID for continuing a conversation (optional)"
+        required: false
+        type: "string"
+        
+      - name: max_wait_time
+        description: "Maximum time to wait for response in seconds"
+        required: false
+        type: "integer"
+        default: 120
+        
+      - name: additional_instructions
+        description: "Additional instructions for this specific run"
+        required: false
+        type: "string"
+        
+      - name: parse_json
+        description: "Try to parse response as JSON"
+        required: false
+        type: "boolean"
+        default: true
+    
+    returns:
+      type: "object"
+      properties:
+        response: "The assistant's response (string or parsed JSON)"
+        thread_id: "Thread ID for continuing conversation"
+        run_id: "Run ID"
+        messages: "All messages in the thread"
+        raw_response: "Raw text response"
+  
+  # Tags for categorization
+  tags:
+    - ai
+    - assistant
+    - openai
+    - llm
+  
+  # Documentation
+  notes: |
+    This provider integrates with OpenAI's Assistants API, which supports:
+    
+    - **Stateful Conversations**: Maintain context across multiple queries using threads
+    - **File Search**: Query uploaded documents and knowledge bases
+    - **Code Interpreter**: Run Python code for data analysis
+    - **Function Calling**: Call external APIs (requires custom implementation)
+    
+    ## Setup Instructions
+    
+    1. Create an assistant at https://platform.openai.com/assistants
+    2. Configure your assistant with:
+       - Model (e.g., gpt-4o, gpt-4o-mini)
+       - System instructions
+       - Tools (File Search, Code Interpreter)
+       - Files for knowledge base
+    3. Copy your assistant ID (starts with "asst_")
+    4. Use it in Keep with this provider
+    
+    ## Usage in Workflows
+    
+    Basic query:
+    ```yaml
+    - name: analyze_alert
+      provider:
+        type: openaiassistant
+        config: "{{ providers.my_assistant }}"
+        with:
+          prompt: "Analyze this alert: {{ alert.message }}"
+    ```
+    
+    Continue conversation:
+    ```yaml
+    - name: followup
+      provider:
+        type: openaiassistant
+        config: "{{ providers.my_assistant }}"
+        with:
+          prompt: "What should I do next?"
+          thread_id: "{{ steps.analyze_alert.results.thread_id }}"
+    ```
+    
+    ## Differences from OpenAI Provider
+    
+    | Feature | OpenAI Provider | OpenAI Assistant Provider |
+    |---------|----------------|---------------------------|
+    | API | Chat Completions | Assistants API |
+    | Stateful | No | Yes (threads) |
+    | File Search | No | Yes |
+    | Code Interpreter | No | Yes |
+    | Structured Output | Yes | Depends on model |
+    | Speed | Fast | Slower (polling) |
+    | Cost | Per token | Per token + tools usage |
+
