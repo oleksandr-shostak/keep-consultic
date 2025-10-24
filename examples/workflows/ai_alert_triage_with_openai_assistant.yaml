@@ -1,0 +1,178 @@
+workflow:
+  id: ai_alert_triage_assistant
+  name: "AI Alert Triage with OpenAI Assistant"
+  description: Use OpenAI Assistant with knowledge base to analyze alerts and decide actions
+  disabled: false
+  triggers:
+    - type: alert
+      cel: "providerType.contains('mailgun')"
+  inputs: []
+  consts: {}
+  owners: []
+  services: []
+  steps:
+    # Step 1: Analyze alert using OpenAI Assistant with knowledge base access
+    - name: ai_triage_alert
+      provider:
+        type: openaiassistant
+        config: "{{ providers.keep_mailgun_analyzer }}"  # Your assistant from UI
+        with:
+          prompt: |
+            You are an expert SRE analyzing system alerts for triage. Use the company knowledge base to make informed decisions.
+
+            Alert Details:
+            - Name: {{ alert.name }}
+            - Status: {{ alert.status }}
+            - Source: {{ alert.source }}
+            - Severity: {{ alert.severity }}
+            - Message: {{ keep.slice(alert.message, 0, 1000) }}
+            - Description: {{ alert.description }}
+
+            DECISION RULES:
+
+            NOTIFY SLACK + ESCALATE if:
+            - Critical production issues
+            - Service outages
+            - Data loss risks
+            - Security incidents
+            - Multiple related failures
+            - Similar incidents in knowledge base marked as critical
+
+            ESCALATE ONLY (no Slack) if:
+            - Important but not urgent
+            - Degraded performance
+            - Resource warnings >75%
+            - Potential future issues
+            - Known issues with documented workarounds
+
+            RESOLVE SILENTLY if:
+            - Informational messages
+            - Test alerts
+            - Auto-recovered issues
+            - Duplicate/noise
+            - Non-production environments
+            - Known false positives from knowledge base
+
+            Search the knowledge base for:
+            1. Similar past incidents
+            2. Known issues and workarounds
+            3. Company-specific escalation policies
+            4. Related documentation
+
+            Respond in JSON format with:
+            {
+              "action": "notify_and_escalate" or "escalate_only" or "resolve_silently",
+              "reason": "Brief explanation why, including knowledge base findings",
+              "recommended_severity": "critical" or "high" or "medium" or "low" or "info",
+              "related_docs": ["List of relevant documentation links from knowledge base"],
+              "similar_incidents": ["List of similar past incidents if found"]
+            }
+          max_wait_time: 60
+          parse_json: true
+          additional_instructions: |
+            Respond ONLY with valid JSON. Use the knowledge base to ground your decisions.
+            If you find relevant documentation or past incidents, include them in your response.
+    
+    # Step 2: Log the AI analysis for debugging
+    - name: log_ai_analysis
+      provider:
+        type: console
+        with:
+          message: |
+            🤖 AI Assistant Analysis:
+            Action: {{ steps.ai_triage_alert.results.response.action }}
+            Reason: {{ steps.ai_triage_alert.results.response.reason }}
+            Severity: {{ steps.ai_triage_alert.results.response.recommended_severity }}
+            Thread ID: {{ steps.ai_triage_alert.results.thread_id }}
+    
+    # Step 3: Enrich alert with AI decision and findings
+    - name: enrich_with_ai_decision
+      provider:
+        type: keep
+        config: "{{ providers.default-keep }}"
+        with:
+          version: 2
+          filter: "fingerprint == '{{ alert.fingerprint }}'"
+          limit: 1
+          enrich_alert:
+            - key: ai_triage_action
+              value: "{{ steps.ai_triage_alert.results.response.action }}"
+            - key: ai_triage_reason
+              value: "{{ steps.ai_triage_alert.results.response.reason }}"
+            - key: ai_recommended_severity
+              value: "{{ steps.ai_triage_alert.results.response.recommended_severity }}"
+            - key: ai_thread_id
+              value: "{{ steps.ai_triage_alert.results.thread_id }}"
+            - key: ai_analysis_timestamp
+              value: "{{ now }}"
+    
+    # Step 4: Escalate severity if needed
+    - name: escalate_severity
+      if: "'{{ steps.ai_triage_alert.results.response.action }}' == 'notify_and_escalate' or '{{ steps.ai_triage_alert.results.response.action }}' == 'escalate_only'"
+      provider:
+        type: keep
+        config: "{{ providers.default-keep }}"
+        with:
+          version: 2
+          filter: "fingerprint == '{{ alert.fingerprint }}'"
+          limit: 1
+          enrich_alert:
+            - key: severity
+              value: "{{ steps.ai_triage_alert.results.response.recommended_severity }}"
+    
+    # Step 5: Resolve alert silently if AI decides it's not important
+    - name: resolve_alert
+      if: "'{{ steps.ai_triage_alert.results.response.action }}' == 'resolve_silently'"
+      provider:
+        type: keep
+        config: "{{ providers.default-keep }}"
+        with:
+          version: 2
+          filter: "fingerprint == '{{ alert.fingerprint }}'"
+          limit: 1
+          enrich_alert:
+            - key: status
+              value: "resolved"
+            - key: resolution_reason
+              value: "AI Assistant auto-resolved: {{ steps.ai_triage_alert.results.response.reason }}"
+  
+  actions:
+    # Action 1: Notify Slack for critical alerts
+    - name: notify_slack
+      if: "'{{ steps.ai_triage_alert.results.response.action }}' == 'notify_and_escalate'"
+      provider:
+        type: slack
+        config: "{{ providers.keep_slack }}"
+        with:
+          channel: "#oncall"
+          message: |
+            🚨 **AI ASSISTANT Escalated Alert Requires Attention**
+            
+            **Alert:** {{ alert.name }}
+            **Source:** {{ alert.source }}
+            **AI Severity:** {{ steps.ai_triage_alert.results.response.recommended_severity | upper }}
+            
+            📋 **AI Assistant Analysis:**
+            {{ steps.ai_triage_alert.results.response.reason }}
+            
+            {% if steps.ai_triage_alert.results.response.similar_incidents %}
+            🔍 **Similar Past Incidents:**
+            {% for incident in steps.ai_triage_alert.results.response.similar_incidents %}
+            • {{ incident }}
+            {% endfor %}
+            {% endif %}
+            
+            {% if steps.ai_triage_alert.results.response.related_docs %}
+            📚 **Related Documentation:**
+            {% for doc in steps.ai_triage_alert.results.response.related_docs %}
+            • {{ doc }}
+            {% endfor %}
+            {% endif %}
+            
+            🔗 **View Alert:** https://keephq-cjm9.consultic.tech/alerts/feed
+            
+            💬 **Continue Investigation:** Use Thread ID `{{ steps.ai_triage_alert.results.thread_id }}` to ask follow-up questions to the AI Assistant
+            
+            **Original Message:**
+            {{ keep.slice(alert.description, 0, 500) }}
+
