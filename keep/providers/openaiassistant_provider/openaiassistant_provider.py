@@ -34,6 +34,13 @@ class OpenaiAssistantProviderAuthConfig:
             "sensitive": True,
         },
     )
+    assistant_id: str = dataclasses.field(
+        metadata={
+            "required": True,
+            "description": "OpenAI Assistant ID (e.g., asst_GPkwWwZeCdU68iUXSQ5wglGk)",
+            "sensitive": False,
+        },
+    )
     organization_id: str | None = dataclasses.field(
         metadata={
             "required": False,
@@ -41,13 +48,6 @@ class OpenaiAssistantProviderAuthConfig:
             "sensitive": False,
         },
         default=None,
-    )
-    assistant_id: str = dataclasses.field(
-        metadata={
-            "required": True,
-            "description": "OpenAI Assistant ID (e.g., asst_GPkwWwZeCdU68iUXSQ5wglGk)",
-            "sensitive": False,
-        },
     )
 
 
