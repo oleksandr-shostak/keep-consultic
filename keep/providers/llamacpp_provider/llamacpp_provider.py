@@ -66,22 +66,47 @@ class LlamacppProvider(BaseProvider):
             response.raise_for_status()
             content = response.json()["content"]
             
+            self.logger.info(
+                "Llama.cpp raw response",
+                extra={"raw_content": content[:500]}  # Log first 500 chars
+            )
+            
             # Strip markdown code blocks if present (common in LLM responses)
             # Matches: ```json\n...\n``` or ```\n...\n```
             content_cleaned = re.sub(r'```(?:json)?\s*\n?(.*?)\n?```', r'\1', content, flags=re.DOTALL)
             content_cleaned = content_cleaned.strip()
             
+            self.logger.info(
+                "Llama.cpp cleaned response",
+                extra={"cleaned_content": content_cleaned[:500]}
+            )
+            
             # Try to parse as JSON (similar to OpenAI provider behavior)
             try:
                 parsed_content = json.loads(content_cleaned)
                 response_content = parsed_content
-            except json.JSONDecodeError:
+                self.logger.info(
+                    "Llama.cpp JSON parsed successfully",
+                    extra={"parsed_keys": list(parsed_content.keys()) if isinstance(parsed_content, dict) else "not_a_dict"}
+                )
+            except json.JSONDecodeError as e:
                 # If not valid JSON, return as-is
                 response_content = content_cleaned
+                self.logger.warning(
+                    "Llama.cpp response is not valid JSON, returning as text",
+                    extra={"json_error": str(e)}
+                )
             
-            return {
+            result = {
                 "response": response_content,
             }
+            
+            self.logger.info(
+                "Llama.cpp final result structure",
+                extra={"result": result}
+            )
+            
+            return result
 
         except requests.exceptions.RequestException as e:
             raise ProviderException(f"Error calling Llama.cpp API: {str(e)}")
