@@ -1,5 +1,7 @@
 import dataclasses
+import json
 import pydantic
+import re
 import requests
 
 from keep.contextmanager.contextmanager import ContextManager
@@ -64,8 +66,21 @@ class LlamacppProvider(BaseProvider):
             response.raise_for_status()
             content = response.json()["content"]
             
+            # Strip markdown code blocks if present (common in LLM responses)
+            # Matches: ```json\n...\n``` or ```\n...\n```
+            content_cleaned = re.sub(r'```(?:json)?\s*\n?(.*?)\n?```', r'\1', content, flags=re.DOTALL)
+            content_cleaned = content_cleaned.strip()
+            
+            # Try to parse as JSON (similar to OpenAI provider behavior)
+            try:
+                parsed_content = json.loads(content_cleaned)
+                response_content = parsed_content
+            except json.JSONDecodeError:
+                # If not valid JSON, return as-is
+                response_content = content_cleaned
+            
             return {
-                "response": content,
+                "response": response_content,
             }
 
         except requests.exceptions.RequestException as e:
