@@ -26,7 +26,7 @@ from keep.providers.models.provider_config import ProviderConfig
 
 
 @pydantic.dataclasses.dataclass
-class OpenaiAssistantProviderAuthConfig:
+class OpenaiassistantProviderAuthConfig:
     api_key: str = dataclasses.field(
         metadata={
             "required": True,
@@ -51,7 +51,7 @@ class OpenaiAssistantProviderAuthConfig:
     )
 
 
-class OpenaiAssistantProvider(BaseProvider):
+class OpenaiassistantProvider(BaseProvider):
     """Provider for OpenAI Assistants API"""
     
     PROVIDER_DISPLAY_NAME = "OpenAI Assistant"
@@ -69,7 +69,7 @@ class OpenaiAssistantProvider(BaseProvider):
 
     def validate_config(self):
         """Validate provider configuration"""
-        self.authentication_config = OpenaiAssistantProviderAuthConfig(
+        self.authentication_config = OpenaiassistantProviderAuthConfig(
             **self.config.authentication
         )
         
@@ -337,7 +337,7 @@ if __name__ == "__main__":
         },
     )
 
-    provider = OpenaiAssistantProvider(
+    provider = OpenaiassistantProvider(
         context_manager=context_manager,
         provider_id="test_assistant",
         config=config,
