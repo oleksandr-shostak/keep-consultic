@@ -15,6 +15,8 @@ import chevron
 import requests
 
 import keep.functions as keep_functions
+from keep.api.models.alert import AlertDto
+from keep.api.models.incident import IncidentDto
 from keep.contextmanager.contextmanager import ContextManager
 from keep.step.step_provider_parameter import StepProviderParameter
 
