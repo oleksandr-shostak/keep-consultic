@@ -181,6 +181,20 @@ def get_alert_field(alert_or_alerts, field: str = "description", default: str = 
         else:
             alert = alert_or_alerts
         
+        # Convert AlertDto/IncidentDto objects to dict if needed
+        if hasattr(alert, 'dict') and callable(getattr(alert, 'dict')):
+            # Pydantic model with .dict() method
+            try:
+                alert = alert.dict()
+            except:
+                pass
+        elif hasattr(alert, '__dict__'):
+            # Regular object with __dict__
+            try:
+                alert = alert.__dict__
+            except:
+                pass
+        
         # Extract the field
         # Handle dict
         if isinstance(alert, dict):
@@ -189,7 +203,7 @@ def get_alert_field(alert_or_alerts, field: str = "description", default: str = 
             if value is None:
                 return default
             return str(value)
-        # Handle AlertDto or other objects with attributes
+        # Handle objects with attributes
         elif hasattr(alert, field):
             value = getattr(alert, field, default)
             if value is None:
