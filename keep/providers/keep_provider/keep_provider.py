@@ -72,10 +72,12 @@ class KeepProvider(BaseProvider):
         timerange=None,
         filter=None,
         limit: int | None = None,
+        query_type: str = "alerts",
+        offset: int = 0,
         **kwargs,
     ):
         """
-        Query Keep for alerts.
+        Query Keep for alerts or incidents.
         Args:
             filters: filters to query Keep (only for version 1)
             version: version of Keep API
@@ -84,15 +86,45 @@ class KeepProvider(BaseProvider):
             timerange: timerange dict to calculate time delta
             filter: filter to query Keep (only for version 2)
             limit: limit number of results (only for version 2)
+            query_type: type of query - "alerts" or "incidents" (default: "alerts")
+            offset: offset for pagination (only for incidents)
         """
         self.logger.info(
-            "Querying Keep for alerts",
+            f"Querying Keep for {query_type}",
             extra={
                 "filters": filters,
                 "is_distinct": distinct,
                 "time_delta": time_delta,
+                "query_type": query_type,
             },
         )
+        
+        # Handle incident queries
+        if query_type == "incidents":
+            if version != 2:
+                raise ValueError("Incident queries only supported in version 2")
+            if not filter:
+                raise ValueError("Filter is required for incident queries")
+
+            search_engine = SearchEngine(tenant_id=self.context_manager.tenant_id)
+            try:
+                incidents = search_engine.search_incidents_by_cel(
+                    cel_query=filter, limit=limit or 100, offset=offset
+                )
+                # Convert IncidentDto objects to dicts for workflow usage
+                incidents_dict = [incident.dict() for incident in incidents]
+                self.logger.info(
+                    "Got incidents from Keep", extra={"num_of_incidents": len(incidents)}
+                )
+                return incidents_dict
+            except Exception as e:
+                self.logger.exception(
+                    "Failed to search incidents by CEL: %s",
+                    str(e),
+                )
+                raise
+        
+        # Handle alert queries (existing logic)
         # if timerange is provided, calculate time delta
         if timerange:
             time_delta = int(

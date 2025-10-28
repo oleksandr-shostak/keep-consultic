@@ -8,6 +8,7 @@ from keep.api.core.elastic import ElasticClient
 from keep.api.core.tenant_configuration import TenantConfiguration
 from keep.api.models.alert import AlertDto, AlertStatus
 from keep.api.models.db.preset import PresetDto, PresetSearchQuery
+from keep.api.models.incident import IncidentDto
 from keep.api.models.query import QueryDto
 from keep.api.models.time_stamp import TimeStampFilter
 from keep.api.utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
@@ -122,6 +123,47 @@ class SearchEngine:
         filtered_alerts = convert_db_alerts_to_dto_alerts(db_alerts)
         self.logger.info("Finished searching alerts by CEL")
         return filtered_alerts
+
+    def search_incidents_by_cel(
+        self,
+        cel_query: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[IncidentDto]:
+        """Search for incidents based on a CEL query
+
+        Args:
+            cel_query (str): The CEL query to search for
+            limit (int): Maximum number of incidents to return
+            offset (int): Offset for pagination
+
+        Returns:
+            list[IncidentDto]: The list of incidents that match the query
+        """
+        from keep.api.bl.incidents_bl import IncidentBl
+
+        self.logger.info("Searching incidents by CEL")
+        incident_bl = IncidentBl(tenant_id=self.tenant_id, session=None)
+
+        try:
+            result = incident_bl.query_incidents(
+                tenant_id=self.tenant_id,
+                cel=cel_query,
+                limit=limit,
+                offset=offset,
+            )
+            incidents = result.items
+            self.logger.info(
+                "Finished searching incidents by CEL",
+                extra={"num_of_incidents": len(incidents)},
+            )
+            return incidents
+        except Exception as e:
+            self.logger.exception(
+                "Failed to search incidents by CEL: %s",
+                str(e),
+            )
+            raise
 
     def _search_alerts_by_sql(
         self, sql_query: dict, limit=1000, timeframe: int = 0
