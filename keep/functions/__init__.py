@@ -160,7 +160,7 @@ def get_alert_field(alert_or_alerts, field: str = "description", default: str = 
     If a list is provided, extracts the field from the last alert.
     
     Args:
-        alert_or_alerts: Alert dict or list of alert dicts
+        alert_or_alerts: Alert dict or list of alert dicts or AlertDto objects
         field (str): The field to extract (default: "description")
         default (str): Default value if field not found (default: "N/A")
     
@@ -182,9 +182,16 @@ def get_alert_field(alert_or_alerts, field: str = "description", default: str = 
             alert = alert_or_alerts
         
         # Extract the field
+        # Handle dict
         if isinstance(alert, dict):
             value = alert.get(field, default)
             # Convert to string and handle None
+            if value is None:
+                return default
+            return str(value)
+        # Handle AlertDto or other objects with attributes
+        elif hasattr(alert, field):
+            value = getattr(alert, field, default)
             if value is None:
                 return default
             return str(value)
