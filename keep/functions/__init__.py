@@ -154,6 +154,47 @@ def last(iterable):
     return iterable[-1]
 
 
+def get_alert_field(alert_or_alerts, field: str = "description", default: str = "N/A"):
+    """
+    Safely extract a specific field from an alert or list of alerts.
+    If a list is provided, extracts the field from the last alert.
+    
+    Args:
+        alert_or_alerts: Alert dict or list of alert dicts
+        field (str): The field to extract (default: "description")
+        default (str): Default value if field not found (default: "N/A")
+    
+    Returns:
+        str: The extracted field value or default
+        
+    Examples:
+        keep.get_alert_field(incident.alerts, "description")
+        keep.get_alert_field(incident.alerts, "message", "No message")
+        keep.get_alert_field(steps.get_alert.results.0, "name")
+    """
+    try:
+        # If it's a list, get the last alert
+        if isinstance(alert_or_alerts, list):
+            if not alert_or_alerts:
+                return default
+            alert = alert_or_alerts[-1]
+        else:
+            alert = alert_or_alerts
+        
+        # Extract the field
+        if isinstance(alert, dict):
+            value = alert.get(field, default)
+            # Convert to string and handle None
+            if value is None:
+                return default
+            return str(value)
+        else:
+            return default
+    except Exception as e:
+        logger.warning(f"Error extracting field '{field}' from alert: {e}")
+        return default
+
+
 def utcnow() -> datetime.datetime:
     dt = datetime.datetime.now(datetime.timezone.utc)
     return dt
