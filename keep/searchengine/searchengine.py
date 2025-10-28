@@ -129,6 +129,7 @@ class SearchEngine:
         cel_query: str,
         limit: int = 100,
         offset: int = 0,
+        with_alerts: bool = True,
     ) -> list[IncidentDto]:
         """Search for incidents based on a CEL query
 
@@ -136,6 +137,7 @@ class SearchEngine:
             cel_query (str): The CEL query to search for
             limit (int): Maximum number of incidents to return
             offset (int): Offset for pagination
+            with_alerts (bool): If True, include related alerts in the results
 
         Returns:
             list[IncidentDto]: The list of incidents that match the query
@@ -151,6 +153,7 @@ class SearchEngine:
                 cel=cel_query,
                 limit=limit,
                 offset=offset,
+                with_alerts=with_alerts,
             )
             incidents = result.items
             self.logger.info(

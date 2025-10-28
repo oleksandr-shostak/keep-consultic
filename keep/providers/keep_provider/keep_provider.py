@@ -109,12 +109,23 @@ class KeepProvider(BaseProvider):
             search_engine = SearchEngine(tenant_id=self.context_manager.tenant_id)
             try:
                 incidents = search_engine.search_incidents_by_cel(
-                    cel_query=filter, limit=limit or 100, offset=offset
+                    cel_query=filter, limit=limit or 100, offset=offset, with_alerts=True
                 )
                 # Convert IncidentDto objects to dicts for workflow usage
-                incidents_dict = [incident.dict() for incident in incidents]
+                # Include alerts in the serialization
+                incidents_dict = []
+                for incident in incidents:
+                    incident_data = incident.dict()
+                    # Add the alerts property explicitly
+                    incident_data["alerts"] = [alert.dict() for alert in incident.alerts]
+                    incidents_dict.append(incident_data)
+                
                 self.logger.info(
-                    "Got incidents from Keep", extra={"num_of_incidents": len(incidents)}
+                    "Got incidents from Keep", 
+                    extra={
+                        "num_of_incidents": len(incidents),
+                        "with_alerts": True
+                    }
                 )
                 return incidents_dict
             except Exception as e:
