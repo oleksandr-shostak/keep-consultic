@@ -79,6 +79,7 @@ class WorkflowStore:
         workflow_id = workflow.get("id")
         self.logger.info(f"Creating workflow {workflow_id}")
         interval = self.parser.parse_interval(workflow)
+        cron_expression = self.parser.parse_cron_expression(workflow)
         if not workflow.get("name"):  # workflow name is None or empty string
             workflow_name = workflow_id
             workflow["name"] = workflow_name
@@ -93,6 +94,7 @@ class WorkflowStore:
             created_by=created_by,
             updated_by=created_by,
             interval=interval,
+            cron_expression=cron_expression,
             is_disabled=Parser.parse_disabled(workflow),
             workflow_raw=cyaml.dump(workflow, width=99999),
             force_update=force_update,

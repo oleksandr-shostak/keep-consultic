@@ -88,7 +88,10 @@ const AlertTriggerSchema = z.object({
 const IntervalTriggerSchema = z
   .object({
     type: z.literal("interval"),
-    value: z.union([z.string(), z.number()]),
+    value: z.union([
+      z.string(), // Supports time suffixes like "5m", "8h", "2d" AND cron expressions like "0 8,16 * * *"
+      z.number()  // Supports numeric values in seconds
+    ]),
   })
   .strict();
 

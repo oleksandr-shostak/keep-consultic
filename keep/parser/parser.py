@@ -412,6 +412,14 @@ class Parser:
         return workflow_tags
 
     def parse_interval(self, workflow) -> int:
+        """
+        Parse interval from workflow. Returns 0 for cron expressions (handled separately).
+        
+        Supports:
+        - Numeric values in seconds: 300
+        - Time suffixes: "5m", "8h", "2d"
+        - Cron expressions: "0 8,16 * * *" (returns 0, handled by cron scheduler)
+        """
         # backward compatibility
         workflow_interval = workflow.get("interval", 0)
         triggers = workflow.get("triggers", [])
@@ -421,6 +429,19 @@ class Parser:
 
         # Convert time strings to seconds
         if isinstance(workflow_interval, str):
+            # Check if it's a cron expression (contains spaces and cron-like pattern)
+            if " " in workflow_interval:
+                try:
+                    from croniter import croniter
+                    # Validate cron expression
+                    croniter(workflow_interval)
+                    # Return 0 for cron expressions - they're handled by cron scheduler
+                    self.logger.debug(f"Detected cron expression: {workflow_interval}")
+                    return 0
+                except Exception as e:
+                    self.logger.warning(f"Invalid cron expression '{workflow_interval}': {e}")
+                    # Fall through to try other formats
+            
             if workflow_interval.isnumeric():
                 workflow_interval = int(workflow_interval)
             elif workflow_interval.endswith("m"):
@@ -447,6 +468,36 @@ class Parser:
             raise ValueError(f"Invalid interval format: {workflow_interval}")
 
         return workflow_interval
+
+    def parse_cron_expression(self, workflow) -> typing.Optional[str]:
+        """
+        Extract cron expression from workflow triggers.
+        Returns None if no cron expression is found.
+        """
+        # Check root level for backward compatibility
+        workflow_interval = workflow.get("interval")
+        if isinstance(workflow_interval, str) and " " in workflow_interval:
+            try:
+                from croniter import croniter
+                croniter(workflow_interval)
+                return workflow_interval
+            except Exception:
+                pass
+        
+        # Check triggers
+        triggers = workflow.get("triggers", [])
+        for trigger in triggers:
+            if trigger.get("type") == "interval":
+                value = trigger.get("value")
+                if isinstance(value, str) and " " in value:
+                    try:
+                        from croniter import croniter
+                        croniter(value)
+                        return value
+                    except Exception:
+                        pass
+        
+        return None
 
     @staticmethod
     def parse_disabled(workflow_dict: dict) -> bool:

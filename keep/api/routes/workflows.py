@@ -839,12 +839,14 @@ async def update_workflow_by_id(
     workflow_raw_data = await __get_workflow_raw_data(request, None)
     parser = Parser()
     workflow_interval = parser.parse_interval(workflow_raw_data)
+    workflow_cron = parser.parse_cron_expression(workflow_raw_data)
     updated_workflow = update_workflow_by_id_db(
         id=workflow_id,
         tenant_id=tenant_id,
         name=workflow_raw_data.get("name", ""),
         description=workflow_raw_data.get("description"),
         interval=workflow_interval,
+        cron_expression=workflow_cron,
         workflow_raw=cyaml.dump(workflow_raw_data, width=99999),
         updated_by=authenticated_entity.email,
         is_disabled=workflow_raw_data.get("disabled", False),
