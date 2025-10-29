@@ -440,7 +440,7 @@ class Parser:
                     return 0
                 except Exception as e:
                     self.logger.warning(f"Invalid cron expression '{workflow_interval}': {e}")
-                    # Fall through to try other formats
+                    raise ValueError(f"Invalid cron expression: {workflow_interval}")
             
             if workflow_interval.isnumeric():
                 workflow_interval = int(workflow_interval)
@@ -450,19 +450,24 @@ class Parser:
                     workflow_interval = minutes * 60
                 except ValueError:
                     self.logger.warning(f"Invalid interval format: {workflow_interval}")
+                    raise ValueError(f"Invalid interval format: {workflow_interval}")
             elif workflow_interval.endswith("h"):
                 try:
                     hours = int(workflow_interval[:-1])
                     workflow_interval = hours * 3600
                 except ValueError:
                     self.logger.warning(f"Invalid interval format: {workflow_interval}")
-
+                    raise ValueError(f"Invalid interval format: {workflow_interval}")
             elif workflow_interval.endswith("d"):
                 try:
                     days = int(workflow_interval[:-1])
                     workflow_interval = days * 86400
                 except ValueError:
                     self.logger.warning(f"Invalid interval format: {workflow_interval}")
+                    raise ValueError(f"Invalid interval format: {workflow_interval}")
+            else:
+                # String that doesn't match any known format
+                raise ValueError(f"Invalid interval format: {workflow_interval}")
 
         if not isinstance(workflow_interval, int):
             raise ValueError(f"Invalid interval format: {workflow_interval}")
