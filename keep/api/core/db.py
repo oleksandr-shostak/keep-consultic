@@ -335,17 +335,30 @@ def get_workflows_that_should_run():
         except Exception:
             logger.exception("Failed to get workflows with interval")
 
-        # Get workflows with cron-based scheduling
+        # Get all workflows to check for cron expressions in their YAML
         try:
-            result_cron = session.exec(
+            result_all = session.exec(
                 select(Workflow)
                 .filter(Workflow.is_deleted == False)
                 .filter(Workflow.is_disabled == False)
-                .filter(Workflow.cron_expression != None)
             )
-            workflows_with_cron = result_cron.all() if result_cron else []
+            all_workflows = result_all.all() if result_all else []
+            # Filter workflows with cron expressions by parsing their YAML
+            from keep.parser.parser import Parser
+            parser = Parser()
+            workflows_with_cron = []
+            for wf in all_workflows:
+                if wf.interval == 0 or wf.interval is None:
+                    try:
+                        import yaml
+                        workflow_dict = yaml.safe_load(wf.workflow_raw)
+                        if workflow_dict and parser.parse_cron_expression(workflow_dict):
+                            workflows_with_cron.append(wf)
+                    except Exception:
+                        pass
         except Exception:
             logger.exception("Failed to get workflows with cron expression")
+            workflows_with_cron = []
 
         logger.debug(f"Found {len(workflows_with_interval)} workflows with interval, {len(workflows_with_cron)} with cron")
         workflows_to_run = []
@@ -461,12 +474,22 @@ def get_workflows_that_should_run():
         for workflow in workflows_with_cron:
             try:
                 from croniter import croniter
+                from keep.parser.parser import Parser
+                import yaml
+                
+                # Parse cron expression from workflow YAML
+                workflow_dict = yaml.safe_load(workflow.workflow_raw)
+                parser = Parser()
+                cron_expression = parser.parse_cron_expression(workflow_dict)
+                
+                if not cron_expression:
+                    continue
                 
                 current_time = datetime.utcnow()
                 last_execution = get_last_completed_execution(session, workflow.id)
                 
                 # Calculate the next scheduled time based on cron expression
-                cron = croniter(workflow.cron_expression, current_time)
+                cron = croniter(cron_expression, current_time)
                 
                 # If there's no last execution, check if we should run now
                 if not last_execution:
@@ -490,7 +513,7 @@ def get_workflows_that_should_run():
                 else:
                     # Check if we should run based on the cron schedule
                     # Get all scheduled times since the last execution
-                    cron_from_last = croniter(workflow.cron_expression, last_execution.started)
+                    cron_from_last = croniter(cron_expression, last_execution.started)
                     next_scheduled = cron_from_last.get_next(datetime)
                     
                     # If the next scheduled time has passed, run the workflow
@@ -571,7 +594,6 @@ def update_workflow_by_id(
     updated_by: str,
     provisioned: bool = False,
     provisioned_file: str | None = None,
-    cron_expression: str | None = None,
 ):
     with Session(engine, expire_on_commit=False) as session:
         if provisioned:
@@ -587,7 +609,6 @@ def update_workflow_by_id(
             name=name,
             description=description,
             interval=interval,
-            cron_expression=cron_expression,
             workflow_raw=workflow_raw,
             is_disabled=is_disabled,
             provisioned=provisioned,
@@ -608,7 +629,6 @@ def update_workflow_with_values(
     provisioned: bool = False,
     provisioned_file: str | None = None,
     session: Session | None = None,
-    cron_expression: str | None = None,
 ):
     # In case the workflow name changed to empty string, keep the old name
     name = name or existing_workflow.name
@@ -648,7 +668,6 @@ def update_workflow_with_values(
         existing_workflow.description = description
         existing_workflow.updated_by = updated_by
         existing_workflow.interval = interval
-        existing_workflow.cron_expression = cron_expression
         existing_workflow.workflow_raw = workflow_raw
         existing_workflow.revision = next_revision
         existing_workflow.last_updated = datetime.now()
@@ -691,7 +710,6 @@ def add_or_update_workflow(
     force_update: bool = False,
     is_test: bool = False,
     lookup_by_name: bool = False,
-    cron_expression: str | None = None,
 ) -> Workflow:
     with Session(engine, expire_on_commit=False) as session:
         if provisioned or lookup_by_name:
@@ -708,7 +726,6 @@ def add_or_update_workflow(
                 name=name,
                 description=description,
                 interval=interval,
-                cron_expression=cron_expression,
                 workflow_raw=workflow_raw,
                 is_disabled=is_disabled,
                 is_test=is_test,
@@ -729,7 +746,6 @@ def add_or_update_workflow(
                 name=name,
                 description=description,
                 interval=interval,
-                cron_expression=cron_expression,
                 workflow_raw=workflow_raw,
                 is_disabled=is_disabled,
                 provisioned=provisioned,
@@ -751,7 +767,6 @@ def add_or_update_workflow(
                 updated_by=updated_by,
                 last_updated=now,
                 interval=interval,
-                cron_expression=cron_expression,
                 is_disabled=is_disabled,
                 workflow_raw=workflow_raw,
                 provisioned=provisioned,
