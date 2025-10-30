@@ -154,7 +154,7 @@ def last(iterable):
     return iterable[-1]
 
 
-def get_alert_field(alert_or_alerts, field: str = "description", default: str = "N/A", index: int = -1):
+def get_alert_field(alert_or_alerts, field: str = "description", default: str = "N/A", index: int = -1, **kwargs):
     """
     Safely extract a specific field from an alert, list of alerts, or incident.
     
@@ -162,31 +162,45 @@ def get_alert_field(alert_or_alerts, field: str = "description", default: str = 
     - Single alert (dict or AlertDto object)
     - List of alerts (extracts from alert at specified index)
     - Incident object (extracts alerts first, then gets field from specified alert)
+    - String reference to context variable (e.g., "incident")
     
     Args:
         alert_or_alerts: Can be:
             - Single alert (dict or AlertDto)
             - List of alerts
             - Incident object (with 'alerts' property)
+            - String "incident" (will be resolved from context)
         field (str): The field to extract (default: "description")
         default (str): Default value if field not found (default: "N/A")
         index (int): Which alert to get from list. -1 for last (default), 0 for first
+        **kwargs: Context from workflow execution
     
     Returns:
         str: The extracted field value or default
         
     Examples:
-        # From incident object
-        keep.get_alert_field({{ incident }}, 'name', 'N/A')
-        keep.get_alert_field({{ incident }}, 'message', 'No message', 0)  # first alert
+        # From incident context (preferred - no rendering issues)
+        keep.get_alert_field(incident, 'name', 'N/A')
+        keep.get_alert_field(incident, 'message', 'No message', 0)  # first alert
         
-        # From alert list (old syntax still works)
+        # From alert list  
         keep.get_alert_field({{ incident.alerts }}, 'description')
         
         # From single alert
         keep.get_alert_field({{ steps.get_alert.results.0 }}, 'name')
     """
     try:
+        # Step 0: Handle string references to context variables
+        if isinstance(alert_or_alerts, str) and alert_or_alerts in ['incident', 'alert', 'event']:
+            # This is a reference to a context variable, try to resolve it
+            # The context_manager should be available via kwargs
+            context_manager = kwargs.get('context_manager')
+            if context_manager:
+                if alert_or_alerts == 'incident':
+                    alert_or_alerts = context_manager.incident_context
+                elif alert_or_alerts in ['alert', 'event']:
+                    alert_or_alerts = context_manager.event_context
+        
         # Step 1: Detect if this is an incident object and extract alerts
         alerts = None
         if hasattr(alert_or_alerts, 'alerts'):

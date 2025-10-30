@@ -359,9 +359,10 @@ class IOHandler:
                 keep_func = getattr(keep_functions, func.attr)
                 func_signature = inspect.signature(keep_func)
 
-                # Add tenant_id if needed
+                # Add tenant_id and context_manager if needed
                 if "kwargs" in func_signature.parameters:
                     _kwargs["tenant_id"] = self.context_manager.tenant_id
+                    _kwargs["context_manager"] = self.context_manager
 
                 try:
                     # Call function with both positional and keyword arguments
