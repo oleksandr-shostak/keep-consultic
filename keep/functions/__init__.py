@@ -154,48 +154,84 @@ def last(iterable):
     return iterable[-1]
 
 
-def get_alert_field(alert_or_alerts, field: str = "description", default: str = "N/A"):
+def get_alert_field(alert_or_alerts, field: str = "description", default: str = "N/A", index: int = -1):
     """
-    Safely extract a specific field from an alert or list of alerts.
-    If a list is provided, extracts the field from the last alert.
+    Safely extract a specific field from an alert, list of alerts, or incident.
+    
+    This function intelligently handles multiple input types:
+    - Single alert (dict or AlertDto object)
+    - List of alerts (extracts from alert at specified index)
+    - Incident object (extracts alerts first, then gets field from specified alert)
     
     Args:
-        alert_or_alerts: Alert dict or list of alert dicts or AlertDto objects
+        alert_or_alerts: Can be:
+            - Single alert (dict or AlertDto)
+            - List of alerts
+            - Incident object (with 'alerts' property)
         field (str): The field to extract (default: "description")
         default (str): Default value if field not found (default: "N/A")
+        index (int): Which alert to get from list. -1 for last (default), 0 for first
     
     Returns:
         str: The extracted field value or default
         
     Examples:
-        keep.get_alert_field(incident.alerts, "description")
-        keep.get_alert_field(incident.alerts, "message", "No message")
-        keep.get_alert_field(steps.get_alert.results.0, "name")
+        # From incident object
+        keep.get_alert_field({{ incident }}, 'name', 'N/A')
+        keep.get_alert_field({{ incident }}, 'message', 'No message', 0)  # first alert
+        
+        # From alert list (old syntax still works)
+        keep.get_alert_field({{ incident.alerts }}, 'description')
+        
+        # From single alert
+        keep.get_alert_field({{ steps.get_alert.results.0 }}, 'name')
     """
     try:
-        # If it's a list, get the last alert
+        # Step 1: Detect if this is an incident object and extract alerts
+        alerts = None
+        if hasattr(alert_or_alerts, 'alerts'):
+            # This is an incident object with alerts property
+            try:
+                alerts = alert_or_alerts.alerts
+            except Exception:
+                alerts = None
+        elif isinstance(alert_or_alerts, dict) and 'alerts' in alert_or_alerts:
+            # This is an incident dict with alerts key
+            alerts = alert_or_alerts.get('alerts')
+        
+        # If we extracted alerts from incident, use them
+        if alerts is not None:
+            if not isinstance(alerts, list) or len(alerts) == 0:
+                return default
+            alert_or_alerts = alerts
+        
+        # Step 2: Handle list of alerts
         if isinstance(alert_or_alerts, list):
             if not alert_or_alerts:
                 return default
-            alert = alert_or_alerts[-1]
+            try:
+                alert = alert_or_alerts[index]
+            except (IndexError, KeyError, TypeError):
+                return default
         else:
+            # Single alert
             alert = alert_or_alerts
         
-        # Convert AlertDto/IncidentDto objects to dict if needed
+        # Step 3: Convert AlertDto/IncidentDto objects to dict if needed
         if hasattr(alert, 'dict') and callable(getattr(alert, 'dict')):
             # Pydantic model with .dict() method
             try:
                 alert = alert.dict()
-            except:
+            except Exception:
                 pass
-        elif hasattr(alert, '__dict__'):
+        elif hasattr(alert, '__dict__') and not isinstance(alert, dict):
             # Regular object with __dict__
             try:
                 alert = alert.__dict__
-            except:
+            except Exception:
                 pass
         
-        # Extract the field
+        # Step 4: Extract the field
         # Handle dict
         if isinstance(alert, dict):
             value = alert.get(field, default)
@@ -211,6 +247,7 @@ def get_alert_field(alert_or_alerts, field: str = "description", default: str = 
             return str(value)
         else:
             return default
+            
     except Exception as e:
         logger.warning(f"Error extracting field '{field}' from alert: {e}")
         return default
