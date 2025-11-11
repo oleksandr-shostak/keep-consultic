@@ -175,7 +175,7 @@ class OpenaiassistantProvider(BaseProvider):
 
             response_kwargs: Dict[str, Any] = {
                 "input": [{"role": "user", "content": prompt}],
-            )
+            }
 
             if self.authentication_config.prompt_id:
                 response_kwargs["prompt"] = {"id": self.authentication_config.prompt_id}
