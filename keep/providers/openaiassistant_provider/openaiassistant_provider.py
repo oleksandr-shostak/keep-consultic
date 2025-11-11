@@ -95,20 +95,26 @@ class OpenaiassistantProvider(BaseProvider):
 
         # If prompt configured attempt light validation via prompts.list
         if self.authentication_config.prompt_id:
-            try:
-                prompt = self.client.prompts.retrieve(
-                    self.authentication_config.prompt_id
-                )
-                self.logger.info(
-                    "Successfully connected to OpenAI prompt",
-                    extra={
-                        "prompt_id": prompt.id,
-                        "last_updated": prompt.updated_at,
-                    },
-                )
-            except Exception as exc:
-                raise ProviderException(
-                    f"Failed to retrieve prompt {self.authentication_config.prompt_id}: {exc}"
+            if hasattr(self.client, "prompts"):
+                try:
+                    prompt = self.client.prompts.retrieve(
+                        self.authentication_config.prompt_id
+                    )
+                    self.logger.info(
+                        "Successfully connected to OpenAI prompt",
+                        extra={
+                            "prompt_id": prompt.id,
+                            "last_updated": getattr(prompt, "updated_at", None),
+                        },
+                    )
+                except Exception as exc:
+                    raise ProviderException(
+                        f"Failed to retrieve prompt {self.authentication_config.prompt_id}: {exc}"
+                    )
+            else:
+                self.logger.warning(
+                    "OpenAI client does not expose prompts API; skipping prompt validation",
+                    extra={"prompt_id": self.authentication_config.prompt_id},
                 )
 
     def dispose(self):
