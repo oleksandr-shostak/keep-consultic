@@ -12,7 +12,6 @@ Author: Keep
 """
 
 import json
-import time
 import dataclasses
 import pydantic
 from typing import Optional, Dict, Any, List
@@ -34,12 +33,23 @@ class OpenaiassistantProviderAuthConfig:
             "sensitive": True,
         },
     )
-    assistant_id: str = dataclasses.field(
+    prompt_id: str | None = dataclasses.field(
         metadata={
-            "required": True,
-            "description": "OpenAI Assistant ID (e.g., asst_GPkwWwZeCdU68iUXSQ5wglGk)",
+            "required": False,
+            "description": (
+                "OpenAI Prompt ID (recommended). If omitted, a model must be supplied."
+            ),
             "sensitive": False,
         },
+        default=None,
+    )
+    model: str = dataclasses.field(
+        metadata={
+            "required": False,
+            "description": "Fallback model to use when prompt_id is not supplied.",
+            "sensitive": False,
+        },
+        default="gpt-4.1-mini",
     )
     organization_id: str | None = dataclasses.field(
         metadata={
@@ -52,14 +62,10 @@ class OpenaiassistantProviderAuthConfig:
 
 
 class OpenaiassistantProvider(BaseProvider):
-    """Provider for OpenAI Assistants API"""
-    
+    """Provider for OpenAI Responses + Prompts API"""
+
     PROVIDER_DISPLAY_NAME = "OpenAI Assistant"
     PROVIDER_CATEGORY = ["AI"]
-    
-    # Maximum time to wait for assistant response (seconds)
-    MAX_WAIT_TIME = 120
-    POLL_INTERVAL = 1  # seconds between status checks
 
     def __init__(
         self, context_manager: ContextManager, provider_id: str, config: ProviderConfig
@@ -72,30 +78,38 @@ class OpenaiassistantProvider(BaseProvider):
         self.authentication_config = OpenaiassistantProviderAuthConfig(
             **self.config.authentication
         )
-        
+
+        if (
+            not self.authentication_config.prompt_id
+            and not self.authentication_config.model
+        ):
+            raise ProviderException(
+                "Either prompt_id must be provided or a default model must be configured."
+            )
+
         # Initialize OpenAI client
         self.client = OpenAI(
             api_key=self.authentication_config.api_key,
             organization=self.authentication_config.organization_id,
         )
-        
-        # Verify assistant exists
-        try:
-            assistant = self.client.beta.assistants.retrieve(
-                assistant_id=self.authentication_config.assistant_id
-            )
-            self.logger.info(
-                "Successfully connected to OpenAI Assistant",
-                extra={
-                    "assistant_name": assistant.name,
-                    "assistant_model": assistant.model,
-                    "tools": [tool.type for tool in assistant.tools] if assistant.tools else []
-                }
-            )
-        except Exception as e:
-            raise ProviderException(
-                f"Failed to retrieve assistant {self.authentication_config.assistant_id}: {str(e)}"
-            )
+
+        # If prompt configured attempt light validation via prompts.list
+        if self.authentication_config.prompt_id:
+            try:
+                prompt = self.client.prompts.retrieve(
+                    self.authentication_config.prompt_id
+                )
+                self.logger.info(
+                    "Successfully connected to OpenAI prompt",
+                    extra={
+                        "prompt_id": prompt.id,
+                        "last_updated": prompt.updated_at,
+                    },
+                )
+            except Exception as exc:
+                raise ProviderException(
+                    f"Failed to retrieve prompt {self.authentication_config.prompt_id}: {exc}"
+                )
 
     def dispose(self):
         """Cleanup resources"""
@@ -106,197 +120,132 @@ class OpenaiassistantProvider(BaseProvider):
         scopes = {}
         
         try:
-            # Test if we can retrieve the assistant
-            assistant = self.client.beta.assistants.retrieve(
-                assistant_id=self.authentication_config.assistant_id
+            if self.authentication_config.prompt_id:
+                prompt = self.client.prompts.retrieve(
+                    self.authentication_config.prompt_id
+                )
+                scopes["prompt_access"] = True
+                scopes["prompt_version"] = prompt.version
+            else:
+                # When using direct model access, just test a lightweight responses.create call
+                self.client.responses.create(
+                    model=self.authentication_config.model,
+                    input=[{"role": "user", "content": "ping"}],
+                    max_output_tokens=1,
+                )
+                scopes["responses_access"] = True
+        except Exception as exc:
+            scopes["prompt_access" if self.authentication_config.prompt_id else "responses_access"] = (
+                f"Failed: {exc}"
             )
-            scopes["assistant_access"] = True
-            scopes["assistant_name"] = assistant.name or "Unnamed"
-            scopes["assistant_model"] = assistant.model
-        except Exception as e:
-            scopes["assistant_access"] = f"Failed: {str(e)}"
-        
+
         return scopes
 
     def _query(
         self,
         prompt: str,
-        thread_id: Optional[str] = None,
-        max_wait_time: Optional[int] = None,
+        conversation_id: Optional[str] = None,
         additional_instructions: Optional[str] = None,
         parse_json: bool = True,
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Query the OpenAI Assistant
-        
+        Query the OpenAI Assistant via the Responses API.
+
         Args:
             prompt: The user message to send to the assistant
-            thread_id: Optional existing thread ID for continuing conversation
-            max_wait_time: Maximum time to wait for response (seconds)
+            conversation_id: Optional existing conversation ID for continuing dialogue
             additional_instructions: Additional instructions for this run
             parse_json: Try to parse response as JSON
-            **kwargs: Additional arguments passed to runs.create()
-        
+            **kwargs: Additional arguments forwarded to responses.create()
+
         Returns:
             Dict containing:
                 - response: The assistant's response (string or dict if JSON)
-                - thread_id: The thread ID (for continuing conversation)
-                - run_id: The run ID
-                - messages: All messages in the thread
+                - conversation_id: The conversation ID (for continuing conversation)
+                - output_items: Raw output items from the response
         """
         if not self.client:
             self.client = OpenAI(
                 api_key=self.authentication_config.api_key,
                 organization=self.authentication_config.organization_id,
             )
-        
-        max_wait = max_wait_time or self.MAX_WAIT_TIME
-        
+
         try:
-            # Step 1: Create or use existing thread
-            if thread_id:
-                self.logger.info(f"Using existing thread: {thread_id}")
-                thread = self.client.beta.threads.retrieve(thread_id=thread_id)
+
+            response_kwargs: Dict[str, Any] = {
+                "input": [{"role": "user", "content": prompt}],
+            )
+
+            if self.authentication_config.prompt_id:
+                response_kwargs["prompt"] = {"id": self.authentication_config.prompt_id}
             else:
-                self.logger.info("Creating new thread")
-                thread = self.client.beta.threads.create()
-            
-            # Step 2: Add message to thread
-            self.logger.info(f"Adding message to thread {thread.id}")
-            message = self.client.beta.threads.messages.create(
-                thread_id=thread.id,
-                role="user",
-                content=prompt
-            )
-            
-            # Step 3: Run the assistant
-            self.logger.info(
-                f"Running assistant {self.authentication_config.assistant_id}",
-                extra={"thread_id": thread.id}
-            )
-            
-            run_kwargs = {
-                "thread_id": thread.id,
-                "assistant_id": self.authentication_config.assistant_id,
-            }
-            
+                response_kwargs["model"] = kwargs.pop(
+                    "model", self.authentication_config.model
+                )
+
+            if conversation_id:
+                response_kwargs["conversation"] = conversation_id
+
             if additional_instructions:
-                run_kwargs["additional_instructions"] = additional_instructions
-            
-            # Merge any additional kwargs
-            run_kwargs.update(kwargs)
-            
-            run = self.client.beta.threads.runs.create(**run_kwargs)
-            
-            # Step 4: Poll for completion
-            start_time = time.time()
-            while True:
-                elapsed = time.time() - start_time
-                
-                if elapsed > max_wait:
-                    # Cancel the run if it's taking too long
-                    try:
-                        self.client.beta.threads.runs.cancel(
-                            thread_id=thread.id,
-                            run_id=run.id
-                        )
-                    except:
-                        pass
-                    raise ProviderException(
-                        f"Assistant did not respond within {max_wait} seconds"
-                    )
-                
-                run = self.client.beta.threads.runs.retrieve(
-                    thread_id=thread.id,
-                    run_id=run.id
+                response_kwargs["instructions"] = additional_instructions
+
+            # Allow callers to override defaults (e.g., temperature, tools...)
+            response_kwargs.update(kwargs)
+
+            response = self.client.responses.create(**response_kwargs)
+
+            if getattr(response, "status", "completed") != "completed":
+                raise ProviderException(
+                    f"Assistant response failed with status {response.status}"
                 )
-                
-                self.logger.debug(
-                    f"Run status: {run.status}",
-                    extra={"elapsed": elapsed}
-                )
-                
-                if run.status == "completed":
-                    break
-                elif run.status == "failed":
-                    error_msg = f"Assistant run failed: {run.last_error}"
-                    self.logger.error(error_msg)
-                    raise ProviderException(error_msg)
-                elif run.status == "cancelled":
-                    raise ProviderException("Assistant run was cancelled")
-                elif run.status == "expired":
-                    raise ProviderException("Assistant run expired")
-                elif run.status in ["queued", "in_progress", "requires_action"]:
-                    # Handle function calling if required
-                    if run.status == "requires_action":
-                        self.logger.warning(
-                            "Assistant requires action (function calling), but this is not yet implemented in this provider"
-                        )
-                    time.sleep(self.POLL_INTERVAL)
-                else:
-                    self.logger.warning(f"Unknown run status: {run.status}")
-                    time.sleep(self.POLL_INTERVAL)
-            
-            # Step 5: Retrieve messages
-            messages = self.client.beta.threads.messages.list(
-                thread_id=thread.id,
-                order="asc"
-            )
-            
-            # Get the last assistant message
-            assistant_messages = [
-                msg for msg in messages.data 
-                if msg.role == "assistant"
-            ]
-            
-            if not assistant_messages:
-                raise ProviderException("No response from assistant")
-            
-            last_message = assistant_messages[-1]
-            
-            # Extract text from message content
-            response_text = ""
-            for content_block in last_message.content:
-                if content_block.type == "text":
-                    response_text += content_block.text.value
-            
-            self.logger.info(
-                "Got response from assistant",
-                extra={
-                    "response_length": len(response_text),
-                    "thread_id": thread.id,
-                    "run_id": run.id
-                }
-            )
-            
-            # Try to parse as JSON if requested
-            response_parsed = response_text
-            if parse_json:
+
+            conversation_reference = getattr(response, "conversation", None)
+            response_conversation_id = None
+            if hasattr(conversation_reference, "id"):
+                response_conversation_id = conversation_reference.id
+            elif isinstance(conversation_reference, dict):
+                response_conversation_id = conversation_reference.get("id")
+
+            # Extract output text/items
+            output_items = list(getattr(response, "output", []) or [])
+            output_text = getattr(response, "output_text", "")
+
+            if not output_text:
+                text_blocks: List[str] = []
+                for item in output_items:
+                    content = getattr(item, "content", None)
+                    if not content and isinstance(item, dict):
+                        content = item.get("content")
+                    if not content:
+                        continue
+                    # content can be list of blocks
+                    for block in content:
+                        block_type = getattr(block, "type", None) or block.get("type")
+                        if block_type in {"output_text", "text"}:
+                            text_value = getattr(block, "text", None)
+                            if hasattr(text_value, "value"):
+                                text_blocks.append(text_value.value)
+                            else:
+                                text_blocks.append(block.get("text", ""))
+                output_text = "".join(text_blocks).strip()
+
+            raw_response = output_text
+            response_parsed: Any = raw_response
+            if parse_json and raw_response:
                 try:
-                    response_parsed = json.loads(response_text)
+                    response_parsed = json.loads(raw_response)
                     self.logger.info("Successfully parsed response as JSON")
                 except json.JSONDecodeError:
                     self.logger.debug("Response is not valid JSON, returning as text")
-            
-            # Format all messages for context
-            all_messages = [
-                {
-                    "role": msg.role,
-                    "content": msg.content[0].text.value if msg.content else "",
-                    "created_at": msg.created_at
-                }
-                for msg in messages.data
-            ]
-            
+
             return {
                 "response": response_parsed,
-                "thread_id": thread.id,
-                "run_id": run.id,
-                "messages": all_messages,
-                "raw_response": response_text,
+                "conversation_id": response_conversation_id,
+                "output_items": output_items,
+                "raw_response": raw_response,
             }
-            
+
         except Exception as e:
             if isinstance(e, ProviderException):
                 raise
@@ -323,17 +272,17 @@ if __name__ == "__main__":
     )
 
     api_key = os.environ.get("OPENAI_API_KEY")
-    assistant_id = os.environ.get("ASSISTANT_ID")
+    prompt_id = os.environ.get("PROMPT_ID")
 
-    if not api_key or not assistant_id:
-        print("Please set OPENAI_API_KEY and ASSISTANT_ID environment variables")
+    if not api_key:
+        print("Please set OPENAI_API_KEY environment variable")
         exit(1)
 
     config = ProviderConfig(
         description="OpenAI Assistant Test",
         authentication={
             "api_key": api_key,
-            "assistant_id": assistant_id,
+            "prompt_id": prompt_id,
         },
     )
 
@@ -349,16 +298,15 @@ if __name__ == "__main__":
         prompt="Analyze this alert: Server memory usage is at 95%. Should I be concerned?"
     )
     print(f"Response: {result['response']}")
-    print(f"Thread ID: {result['thread_id']}")
+    print(f"Conversation ID: {result['conversation_id']}")
 
     # Test 2: Continue conversation in same thread
     print("\n=== Test 2: Continue Conversation ===")
     result2 = provider.query(
         prompt="What specific actions should I take right now?",
-        thread_id=result['thread_id']
+        conversation_id=result["conversation_id"],
     )
     print(f"Response: {result2['response']}")
-    print(f"All messages: {len(result2['messages'])}")
 
     # Test 3: With additional instructions
     print("\n=== Test 3: With Additional Instructions ===")
