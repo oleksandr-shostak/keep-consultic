@@ -199,6 +199,9 @@ class OpenaiassistantProvider(BaseProvider):
             # Allow callers to override defaults (e.g., temperature, tools...)
             response_kwargs.update(kwargs)
 
+            # Ensure responses are persisted in OpenAI UI for inspection
+            response_kwargs.setdefault("store", True)
+
             response = self.client.responses.create(**response_kwargs)
 
             if getattr(response, "status", "completed") != "completed":
