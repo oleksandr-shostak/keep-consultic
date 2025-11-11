@@ -243,7 +243,17 @@ class OpenaiassistantProvider(BaseProvider):
             response_parsed: Any = raw_response
             if parse_json and raw_response:
                 try:
-                    response_parsed = json.loads(raw_response)
+                    cleaned_response = raw_response.strip()
+                    if cleaned_response.startswith("```"):
+                        cleaned_response = cleaned_response[3:]
+                        if cleaned_response.lower().startswith("json"):
+                            cleaned_response = cleaned_response[4:]
+                        cleaned_response = cleaned_response.strip()
+                        if cleaned_response.endswith("```"):
+                            cleaned_response = cleaned_response[:-3]
+                        cleaned_response = cleaned_response.strip()
+
+                    response_parsed = json.loads(cleaned_response)
                     self.logger.info("Successfully parsed response as JSON")
                 except json.JSONDecodeError:
                     self.logger.debug("Response is not valid JSON, returning as text")
