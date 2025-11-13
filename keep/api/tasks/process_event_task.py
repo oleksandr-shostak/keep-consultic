@@ -266,6 +266,9 @@ def __save_to_db(
             saved_alerts.append(alert)
             alert_id = alert.id
             formatted_event.event_id = str(alert_id)
+            # Set provider info on the DTO so workflows can use it in CEL expressions
+            formatted_event.providerId = provider_id
+            formatted_event.providerType = provider_type if provider_type else formatted_event.source[0]
 
             if KEEP_AUDIT_EVENTS_ENABLED:
                 audit = AlertAudit(
