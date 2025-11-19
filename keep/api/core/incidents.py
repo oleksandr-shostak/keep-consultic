@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from sqlalchemy import String, and_, case, cast, func, select
+from sqlalchemy.sql import collate
 from sqlmodel import Session, col, text
 from sqlalchemy.orm import foreign, aliased
 
@@ -254,12 +255,17 @@ def __build_base_incident_query(
             )
         )
 
+    # Fix collation mismatch: CAST gets server default collation (utf8mb4_0900_ai_ci in MySQL 8.0+)
+    # but alert_fingerprint uses utf8mb4_unicode_ci. Apply collation to match.
+    incident_id_cast = cast(col(Incident.id), String)
+    if engine.dialect.name == "mysql":
+        incident_id_cast = collate(incident_id_cast, "utf8mb4_unicode_ci")
+    
     sql_query = sql_query.outerjoin(
         incident_enrichment,
         and_(
             Incident.tenant_id == incident_enrichment.tenant_id,
-            cast(col(Incident.id), String)
-            == foreign(incident_enrichment.alert_fingerprint),
+            incident_id_cast == foreign(incident_enrichment.alert_fingerprint),
         ),
     )
 

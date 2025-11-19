@@ -41,7 +41,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import foreign, joinedload, subqueryload
 from sqlalchemy.orm.exc import StaleDataError
-from sqlalchemy.sql import exists, expression
+from sqlalchemy.sql import exists, expression, collate
 from sqlalchemy.sql.functions import count
 from sqlmodel import Session, SQLModel, col, or_, select, text
 from sqlalchemy.orm.attributes import flag_modified
@@ -4129,6 +4129,12 @@ def get_incident_by_id(
     if isinstance(incident_id, str):
         incident_id = __convert_to_uuid(incident_id, should_raise=True)
     with existed_or_new_session(session) as session:
+        # Fix collation mismatch: CAST gets server default collation (utf8mb4_0900_ai_ci in MySQL 8.0+)
+        # but alert_fingerprint uses utf8mb4_unicode_ci. Apply collation to match.
+        incident_id_cast = cast(col(Incident.id), String)
+        if engine.dialect.name == "mysql":
+            incident_id_cast = collate(incident_id_cast, "utf8mb4_unicode_ci")
+        
         query = (
             session.query(
                 Incident,
@@ -4138,8 +4144,7 @@ def get_incident_by_id(
                 AlertEnrichment,
                 and_(
                     Incident.tenant_id == AlertEnrichment.tenant_id,
-                    cast(col(Incident.id), String)
-                    == foreign(AlertEnrichment.alert_fingerprint),
+                    incident_id_cast == foreign(AlertEnrichment.alert_fingerprint),
                 ),
             )
             .filter(
