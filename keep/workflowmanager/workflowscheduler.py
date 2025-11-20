@@ -483,7 +483,19 @@ class WorkflowScheduler:
             elif triggered_by.startswith("incident:"):
                 triggered_by = f"type:{triggered_by} name:{event.name} id:{event.id}"
             else:
-                triggered_by = f"type:alert name:{event.name} id:{event.id}"
+                alert_name = (
+                    getattr(event, "name", None)
+                    or getattr(event, "message", None)
+                    or getattr(event, "fingerprint", None)
+                    or "unknown"
+                )
+                alert_id = (
+                    getattr(event, "event_id", None)
+                    or getattr(event, "id", None)
+                    or getattr(event, "fingerprint", None)
+                    or "unknown"
+                )
+                triggered_by = f"type:alert name:{alert_name} id:{alert_id}"
 
             if isinstance(event, IncidentDto):
                 event_id = str(event.id)
