@@ -134,6 +134,10 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.env-example
+keep-ui/.env.local
+keep-ui/.env.local-example
+keep-ui/.env.local.example
 
 # Spyder project settings
 .spyderproject
