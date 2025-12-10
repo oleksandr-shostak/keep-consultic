@@ -59,13 +59,16 @@ echo ""
 
 # Check frontend log for malware triggers
 echo "6. Checking frontend logs for malware triggers..."
-RECENT_MALWARE=$(grep '176.117.107.158' /opt/keep/logs/frontend.log 2>/dev/null | tail -1)
-if [ -z "$RECENT_MALWARE" ]; then
-    echo "✓ No recent malware activity in logs"
+MALWARE_COUNT=$(grep -c '176.117.107.158' /opt/keep/logs/frontend.log 2>/dev/null || echo 0)
+if [ "$MALWARE_COUNT" -eq 0 ]; then
+    echo "✓ No malware activity found in logs"
 else
+    RECENT_MALWARE=$(grep '176.117.107.158' /opt/keep/logs/frontend.log 2>/dev/null | tail -1)
     LAST_TIME=$(echo "$RECENT_MALWARE" | grep -oP '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}' | head -1)
-    echo "⚠ Last malware activity: $LAST_TIME"
-    echo "   Check context:"
+    echo "⚠ WARNING: Malware activity detected"
+    echo "   Total occurrences: $MALWARE_COUNT"
+    echo "   Last activity: ${LAST_TIME:-unknown}"
+    echo "   Context (last 5 lines before malware):"
     grep -B5 '176.117.107.158' /opt/keep/logs/frontend.log 2>/dev/null | tail -10
 fi
 echo ""
@@ -74,9 +77,15 @@ echo ""
 echo "7. Keep service status..."
 if systemctl is-active --quiet keep.service; then
     echo "✓ Keep service is running"
-    KEEP_PROC=$(ps aux | grep 'keep api' | grep -v grep)
+    KEEP_PROC=$(ps aux | grep 'keep.cli.cli' | grep -v grep)
     if [ -n "$KEEP_PROC" ]; then
         echo "✓ Backend process is running"
+        API_TEST=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ 2>/dev/null)
+        if [ "$API_TEST" = "200" ]; then
+            echo "✓ Backend API responding (HTTP $API_TEST)"
+        else
+            echo "⚠ WARNING: Backend process running but API not responding (HTTP $API_TEST)"
+        fi
     else
         echo "⚠ WARNING: Keep service active but backend not running"
     fi
