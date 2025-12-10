@@ -209,10 +209,10 @@ fi
 
 # Soketi
 echo -n "Soketi (${PUSHER_PORT}):   "
-if docker ps | grep -q keep-websocket; then
-  echo "✓ Running"
+if timeout 3 bash -c "</dev/tcp/${PUSHER_HOST}/${PUSHER_PORT}" >/dev/null 2>&1; then
+  echo "✓ Reachable"
 else
-  echo "✗ Not running"
+  echo "✗ Not reachable"
 fi
 
 # Tmux
