@@ -54,20 +54,25 @@ def upgrade() -> None:
             # ignore because this constraint may not exist in prod
             pass
 
-        op.execute(
+    # MariaDB rejected the CTE+DELETE form; use a derived-table join instead.
+    op.execute(
+        """
+                DELETE ae
+                FROM alertenrichment ae
+                JOIN (
+                    SELECT id
+                    FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY tenant_id, alert_fingerprint
+                                   ORDER BY timestamp DESC
+                               ) AS rn
+                        FROM alertenrichment
+                    ) t
+                    WHERE t.rn > 1
+                ) d ON ae.id = d.id;
             """
-                WITH duplicates AS (
-                    SELECT id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY tenant_id, alert_fingerprint 
-                            ORDER BY timestamp DESC
-                        ) AS rn
-                    FROM alertenrichment
-                )
-                DELETE FROM alertenrichment
-                WHERE id IN (SELECT id FROM duplicates WHERE rn > 1);
-            """
-        )
+    )
 
         with op.batch_alter_table("alertenrichment") as batch_op:
             batch_op.create_unique_constraint(
