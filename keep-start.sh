@@ -137,9 +137,12 @@ done
 # ============================================================================
 if [[ "$BACKEND_STARTED" == "true" ]]; then
   echo "3) Starting Frontend in tmux..."
+  # Clean .next directory before starting (do it synchronously, not in tmux)
+  rm -rf /opt/keep/keep-ui/.next 2>/dev/null || true
+  sleep 1
+
   tmux new-window -t keep -n frontend
   tmux send-keys -t keep:frontend "cd /opt/keep/keep-ui" Enter
-  tmux send-keys -t keep:frontend "rm -rf .next" Enter
   tmux send-keys -t keep:frontend "npm run dev 2>&1 | tee ../logs/frontend.log" Enter
 else
   echo "⚠ Skipping frontend start (backend not running)"
