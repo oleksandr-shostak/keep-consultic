@@ -66,14 +66,30 @@ echo "════════════════════════�
 echo ""
 
 # ============================================================================
-# CHECK NATIVE SOKETI (WEBSOCKET)
+# START SOKETI (WEBSOCKET) IN DOCKER
 # ============================================================================
-echo "1) Checking WebSocket (Soketi)..."
-if timeout 3 bash -c "</dev/tcp/${PUSHER_HOST}/${PUSHER_PORT}" >/dev/null 2>&1; then
-  echo "✓ Soketi reachable at ${PUSHER_HOST}:${PUSHER_PORT} (native)"
-else
-  echo "✗ Soketi not reachable at ${PUSHER_HOST}:${PUSHER_PORT} — start your native Soketi service first"
-fi
+echo "1) Starting Soketi WebSocket in Docker..."
+docker run -d --rm \
+  --name keep-websocket \
+  -p ${PUSHER_PORT}:6001 \
+  -e SOKETI_DEFAULT_APP_ID=${PUSHER_APP_ID} \
+  -e SOKETI_DEFAULT_APP_KEY=${PUSHER_APP_KEY} \
+  -e SOKETI_DEFAULT_APP_SECRET=${PUSHER_APP_SECRET} \
+  quay.io/soketi/soketi:1.4-16-debian >/dev/null 2>&1
+
+echo "Waiting for Soketi to start..."
+for i in {1..10}; do
+  if timeout 3 bash -c "</dev/tcp/127.0.0.1/${PUSHER_PORT}" >/dev/null 2>&1; then
+    echo "✓ Soketi is UP at 127.0.0.1:${PUSHER_PORT} (Docker)"
+    break
+  fi
+  if [[ $i -eq 10 ]]; then
+    echo "✗ Soketi failed to start after 10s"
+    echo "Check with: docker logs keep-websocket"
+    exit 1
+  fi
+  sleep 1
+done
 
 # ============================================================================
 # ENSURE TMUX
