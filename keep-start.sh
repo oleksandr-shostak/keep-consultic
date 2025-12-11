@@ -14,8 +14,15 @@ mkdir -p logs state
 echo "Stopping existing services..."
 pkill -f "keep api" 2>/dev/null || true
 pkill -f "npm run dev" 2>/dev/null || true
+pkill -f "next dev" 2>/dev/null || true
 docker rm -f keep-websocket 2>/dev/null || true
 tmux kill-session -t keep 2>/dev/null || true
+
+# Kill any process on port 3000 (frontend), 8080 (backend), 6001 (soketi)
+lsof -ti:3000 | xargs -r kill -9 2>/dev/null || true
+lsof -ti:8080 | xargs -r kill -9 2>/dev/null || true
+lsof -ti:6001 | xargs -r kill -9 2>/dev/null || true
+
 sleep 2
 
 # ============================================================================
