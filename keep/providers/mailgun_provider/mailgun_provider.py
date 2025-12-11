@@ -87,6 +87,7 @@ class MailgunProviderAuthConfig:
 class MailgunProvider(BaseProvider):
     MAILGUN_API_KEY = os.environ.get("MAILGUN_API_KEY")
     MAILGUN_DOMAIN = os.environ.get("MAILGUN_DOMAIN", "mails.keephq.dev")
+    MAILGUN_REGION = os.environ.get("MAILGUN_REGION", "US")
     WEBHOOK_INSTALLATION_REQUIRED = True
     PROVIDER_CATEGORY = ["Collaboration"]
 
@@ -234,7 +235,10 @@ class MailgunProvider(BaseProvider):
                 sender = f"{sender}>"
             expression = f'({expression} and match_header("from", "{sender}"))'
 
-        url = "https://api.mailgun.net/v3/routes"
+        # Use correct API endpoint based on region
+        api_base = "https://api.eu.mailgun.net" if MailgunProvider.MAILGUN_REGION.upper() == "EU" else "https://api.mailgun.net"
+        url = f"{api_base}/v3/routes"
+
         payload = {
             "priority": 0,
             "expression": expression,
