@@ -246,6 +246,17 @@ class MailgunProvider(BaseProvider):
         }
 
         route_id = self.config.authentication.get("route_id")
+
+        logger.info(
+            "Creating Mailgun route",
+            extra={
+                "email": email,
+                "expression": expression,
+                "keep_api_url": keep_api_url,
+                "updating_existing": bool(route_id),
+            }
+        )
+
         if route_id:
             response = requests.put(
                 f"{url}/{self.config.authentication.get('route_id')}",
@@ -258,9 +269,27 @@ class MailgunProvider(BaseProvider):
                 auth=("api", MailgunProvider.MAILGUN_API_KEY),
                 data=payload,
             )
+
+        logger.info(
+            "Mailgun API response",
+            extra={
+                "status_code": response.status_code,
+                "response_text": response.text,
+            }
+        )
+
         response.raise_for_status()
         response_json = response.json()
         route_id = route_id or response_json.get("route", {}).get("id")
+
+        logger.info(
+            "Mailgun route created successfully",
+            extra={
+                "route_id": route_id,
+                "email": email,
+            }
+        )
+
         return {"route_id": route_id, "email": email}
 
     @staticmethod
