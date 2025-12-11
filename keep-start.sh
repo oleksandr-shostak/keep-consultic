@@ -263,3 +263,14 @@ fi
 echo "Attach to see logs: tmux attach -t keep"
 echo "Detach from tmux:   Ctrl+B then d"
 echo ""
+
+# ============================================================================
+# KEEP SCRIPT RUNNING (for systemd)
+# ============================================================================
+# Wait for tmux session to exit (keeps systemd service active)
+echo "Script will monitor tmux session..."
+while tmux has-session -t keep 2>/dev/null; do
+  sleep 10
+done
+
+echo "Tmux session ended - shutting down"
