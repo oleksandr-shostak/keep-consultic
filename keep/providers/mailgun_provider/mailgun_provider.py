@@ -249,14 +249,12 @@ class MailgunProvider(BaseProvider):
         if route_id:
             response = requests.put(
                 f"{url}/{self.config.authentication.get('route_id')}",
-                files=payload,
                 auth=("api", MailgunProvider.MAILGUN_API_KEY),
                 data=payload,
             )
         else:
             response = requests.post(
                 url,
-                files=payload,
                 auth=("api", MailgunProvider.MAILGUN_API_KEY),
                 data=payload,
             )
