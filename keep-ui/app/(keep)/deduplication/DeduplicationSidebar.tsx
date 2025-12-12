@@ -328,10 +328,14 @@ const DeduplicationSidebar: React.FC<DeduplicationSidebarProps> = ({
                       }
                       options={alertProviders
                         .filter((provider) => provider.type !== "keep")
+                        .filter((provider) => provider.id && provider.type) // Filter out invalid providers
                         .map((provider) => ({
                           value: `${provider.type}_${provider.id}`,
                           label:
-                            provider.details?.name || provider.id || "main",
+                            provider.details?.name ||
+                            provider.display_name ||
+                            provider.id ||
+                            `${provider.type} (Unknown)`,
                           logoUrl: `/icons/${provider.type}-icon.png`,
                         }))}
                       placeholder="Select provider"
@@ -357,10 +361,15 @@ const DeduplicationSidebar: React.FC<DeduplicationSidebarProps> = ({
                                     `${provider.type}_${provider.id}` ===
                                     `${selectedProviderType}_${selectedProviderId}`
                                 )?.details?.name ||
+                                alertProviders.find(
+                                  (provider) =>
+                                    `${provider.type}_${provider.id}` ===
+                                    `${selectedProviderType}_${selectedProviderId}`
+                                )?.display_name ||
                                 (selectedProviderId !== "null" &&
                                 selectedProviderId !== null
                                   ? selectedProviderId
-                                  : "main"),
+                                  : `${selectedProviderType} (Unknown)`),
                               logoUrl: `/icons/${selectedProviderType}-icon.png`,
                             } as ProviderOption)
                           : null
