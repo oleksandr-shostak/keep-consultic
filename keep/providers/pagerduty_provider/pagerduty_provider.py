@@ -688,6 +688,7 @@ class PagerdutyProvider(
         routing_key: str = "",
         requester: str = "",
         incident_id: str = "",
+        body: dict | str | None = None,
         event_type: typing.Literal["trigger", "acknowledge", "resolve"] | None = None,
         severity: typing.Literal["critical", "error", "warning", "info"] | None = None,
         source: str = "custom_event",
@@ -730,11 +731,12 @@ class PagerdutyProvider(
                 **kwargs,
             )
         else:
+            incident_body = body or kwargs.get("body") or kwargs.get("alert_body")
             return self._trigger_incident(
                 service_id,
                 title,
                 # Backward-compatible: older workflows used `alert_body`, schema/docs use `body`.
-                kwargs.get("body") or kwargs.get("alert_body"),
+                incident_body,
                 requester,
                 incident_id,
                 priority,

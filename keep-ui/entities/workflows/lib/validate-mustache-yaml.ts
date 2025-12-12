@@ -279,5 +279,60 @@ export const validateMustacheVariableForYAMLStep = (
       ];
     }
   }
+  if (parts[0] === "actions") {
+    const actionName = parts[1];
+    if (!actionName) {
+      return [
+        `Variable: '${cleanedVariableName}' - To access the results of an action, you need to specify the action name.`,
+        "warning",
+      ];
+    }
+
+    if (currentStepType === "step") {
+      return [
+        `Variable: '${cleanedVariableName}' - You can't access the results of an action from a step.`,
+        "error",
+      ];
+    }
+
+    const actionIndex =
+      definition.actions?.findIndex((a) => a.name === actionName) ?? -1;
+    const action = actionIndex !== -1 ? definition.actions?.[actionIndex] : null;
+    const currentActionIndex =
+      currentStepType === "action"
+        ? (definition.actions?.findIndex((a) => a.name === currentStep.name) ?? -1)
+        : -1;
+
+    if (!action || actionIndex === -1) {
+      return [
+        `Variable: '${cleanedVariableName}' - an '${actionName}' action doesn't exist.`,
+        "error",
+      ];
+    }
+
+    const isCurrentAction = action.name === currentStep.name;
+    if (isCurrentAction) {
+      return [
+        `Variable: '${cleanedVariableName}' - You can't access the results of the current action.`,
+        "error",
+      ];
+    }
+
+    if (currentActionIndex !== -1 && actionIndex > currentActionIndex) {
+      return [
+        `Variable: '${cleanedVariableName}' - You can't access the results of an action that appears after the current action.`,
+        "error",
+      ];
+    }
+
+    if (parts.length > 2 && parts[2] === "results") {
+      // todo: validate results properties
+      return null;
+    }
+    return [
+      `Variable: '${cleanedVariableName}' - To access the results of an action, use 'results' as suffix.`,
+      "warning",
+    ];
+  }
   return [`Variable: '${cleanedVariableName}' - unknown variable.`, "warning"];
 };
