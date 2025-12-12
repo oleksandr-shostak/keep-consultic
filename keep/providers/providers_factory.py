@@ -638,6 +638,12 @@ class ProvidersFactory:
             provider = provider.copy()
             provider.linked = True
             provider.id = provider_id
+            # Linked providers are inferred from ingested alerts, so they should always be treated
+            # as alert sources regardless of their static provider metadata/tags.
+            if provider.tags is None:
+                provider.tags = ["alert"]
+            elif "alert" not in provider.tags:
+                provider.tags.append("alert")
             if last_alert_received:
                 provider.last_alert_received = last_alert_received.replace(
                     tzinfo=datetime.timezone.utc

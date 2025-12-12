@@ -157,11 +157,17 @@ export const DeduplicationTable: React.FC<DeduplicationTableProps> = ({
       columnHelper.accessor("description", {
         header: "Description",
         cell: (info) => {
-          const matchingProvider = providers.installed_providers.find(
-            (provider) => provider.id === info.row.original.provider_id
+          const matchingProvider = [
+            ...providers.installed_providers,
+            ...providers.linked_providers,
+          ].find(
+            (provider) =>
+              provider.id === info.row.original.provider_id &&
+              provider.type === info.row.original.provider_type
           );
           const providerName =
-            matchingProvider?.details.name ||
+            matchingProvider?.details?.name ||
+            matchingProvider?.display_name ||
             info.row.original.provider_id ||
             "Keep";
 
