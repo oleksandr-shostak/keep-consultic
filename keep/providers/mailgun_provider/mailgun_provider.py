@@ -592,7 +592,7 @@ class MailgunProvider(BaseProvider):
                 name=name,
                 source=[source],
                 message=message,
-                description=message,
+                description=None,
                 lastReceived=timestamp,
                 severity=severity,
                 status=status,
