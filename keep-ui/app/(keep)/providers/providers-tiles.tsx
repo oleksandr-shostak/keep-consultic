@@ -87,6 +87,7 @@ const ProvidersTiles = ({
   const sortedProviders = providers
     .filter(
       (provider) =>
+        provider.linked ||
         Object.keys(provider.config || {}).length > 0 ||
         (provider.tags && provider.tags.includes("alert"))
     )

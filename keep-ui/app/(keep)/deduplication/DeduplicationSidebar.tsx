@@ -84,7 +84,7 @@ const DeduplicationSidebar: React.FC<DeduplicationSidebarProps> = ({
         { id: null, type: "keep", details: { name: "Keep" }, tags: ["alert"] },
         ...providers.installed_providers,
         ...providers.linked_providers,
-      ].filter((provider) => provider.tags?.includes("alert")),
+      ].filter((provider) => provider.linked || provider.tags?.includes("alert")),
     [providers]
   );
   const fullDeduplication = watch("full_deduplication");
