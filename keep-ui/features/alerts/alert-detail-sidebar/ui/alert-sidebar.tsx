@@ -195,6 +195,15 @@ export const AlertSidebar = ({
                       format={alert.description_format}
                     />
                   </p>
+                  {alert.message && (
+                    <p>
+                      <FieldHeader>Message</FieldHeader>
+                      <FormattedContent
+                        content={alert.message}
+                        format={alert.description_format}
+                      />
+                    </p>
+                  )}
                   <p>
                     <FieldHeader className="flex items-center gap-1">
                       Fingerprint
