@@ -45,7 +45,7 @@ workflow:
         config: "{{ providers.PagerDuty }}"
         with:
           source: keep
-          alert_body:
+          body:
             details:
               client: keep
               client_url: "https://keep.example.com/incidents/{{ incident.id }}"

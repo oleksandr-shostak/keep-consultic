@@ -1,0 +1,117 @@
+workflow:
+  id: pagerduty-incident-auto-sync
+  name: PagerDuty Incident Auto Sync
+  description: Automatically sync Keep incidents to PagerDuty - create on firing, resolve on resolved
+  triggers:
+    - type: incident
+      events:
+        - created
+        - updated
+
+  actions:
+    - name: create-pagerduty-incident
+      # Create only once (avoid duplicates on incident updates)
+      if: "{{ incident.status.value }} == 'firing' and {{ incident.pagerduty_incident_id }} == ''"
+      provider:
+        type: pagerduty
+        config: "{{ providers.pagerduty }}"
+        with:
+          service_id: "P7CU6TM"
+          title: "{{ incident.name }}"
+          requester: "oleksandr.shostak@consultic.com"
+          body:
+            type: incident_body
+            details: |
+              Incident: {{ incident.name }}
+              Description: {{ incident.user_summary }}
+
+              Status: {{ incident.status.value }}
+              Severity: {{ incident.severity }}
+
+              Alert Count: {{ incident.alerts_count }}
+              Services: {{ incident.services }}
+              Alert Sources: {{ incident.alert_sources }}
+
+              Created: {{ incident.creation_time }}
+              Started: {{ incident.start_time }}
+              Last Seen: {{ incident.last_seen_time }}
+
+              Keep Incident ID: {{ incident.id }}
+              Assignee: {{ incident.assignee }}
+
+              Alerts:
+              {{ incident.alerts }}
+          enrich_incident:
+            - key: pagerduty_incident_id
+              value: results.incident.id
+
+    - name: log-pagerduty-created
+      if: "{{ incident.status.value }} == 'firing' and {{ incident.pagerduty_incident_id }} == ''"
+      provider:
+        type: console
+        with:
+          message: |
+            PagerDuty incident created:
+            - Keep Incident ID: {{ incident.id }}
+            - PagerDuty Incident ID: {{ actions.create-pagerduty-incident.results.incident.id }}
+
+    - name: acknowledge-pagerduty-incident
+      if: "{{ incident.status.value }} == 'acknowledged' and {{ incident.pagerduty_incident_id }} != ''"
+      provider:
+        type: pagerduty
+        config: "{{ providers.pagerduty }}"
+        with:
+          incident_id: "{{ incident.pagerduty_incident_id }}"
+          service_id: "P7CU6TM"
+          title: "{{ incident.name }}"
+          requester: "oleksandr.shostak@consultic.com"
+          status: "acknowledged"
+          body:
+            type: incident_body
+            details: "Incident acknowledged in Keep at {{ incident.last_seen_time }}"
+
+    - name: log-pagerduty-acknowledged
+      if: "{{ incident.status.value }} == 'acknowledged' and {{ incident.pagerduty_incident_id }} != ''"
+      provider:
+        type: console
+        with:
+          message: |
+            PagerDuty incident acknowledged:
+            - Keep Incident ID: {{ incident.id }}
+            - PagerDuty Incident ID: {{ incident.pagerduty_incident_id }}
+
+    - name: resolve-pagerduty-incident
+      if: "{{ incident.status.value }} == 'resolved' and {{ incident.pagerduty_incident_id }} != ''"
+      provider:
+        type: pagerduty
+        config: "{{ providers.pagerduty }}"
+        with:
+          incident_id: "{{ incident.pagerduty_incident_id }}"
+          service_id: "P7CU6TM"
+          title: "{{ incident.name }}"
+          requester: "oleksandr.shostak@consultic.com"
+          status: "resolved"
+          resolution: "Incident resolved in Keep at {{ incident.last_seen_time }}"
+          body:
+            type: incident_body
+            details: |
+              Incident Resolved in Keep
+
+              Incident: {{ incident.name }}
+              Description: {{ incident.user_summary }}
+
+              Status: {{ incident.status.value }}
+              Severity: {{ incident.severity }}
+
+              Keep Incident ID: {{ incident.id }}
+              Resolved By: {{ incident.assignee }}
+
+    - name: log-pagerduty-resolved
+      if: "{{ incident.status.value }} == 'resolved' and {{ incident.pagerduty_incident_id }} != ''"
+      provider:
+        type: console
+        with:
+          message: |
+            PagerDuty incident resolved:
+            - Keep Incident ID: {{ incident.id }}
+            - PagerDuty Incident ID: {{ incident.pagerduty_incident_id }}

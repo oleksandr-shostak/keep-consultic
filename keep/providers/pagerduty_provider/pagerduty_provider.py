@@ -733,7 +733,8 @@ class PagerdutyProvider(
             return self._trigger_incident(
                 service_id,
                 title,
-                kwargs.get("alert_body"),
+                # Backward-compatible: older workflows used `alert_body`, schema/docs use `body`.
+                kwargs.get("body") or kwargs.get("alert_body"),
                 requester,
                 incident_id,
                 priority,
