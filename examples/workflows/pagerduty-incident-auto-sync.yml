@@ -23,14 +23,15 @@ workflow:
             type: incident_body
             details: |
               Incident: {{ incident.name }}
-              Description: {{ incident.user_summary }}
+              Summary (user): {{ incident.user_summary }}
+              Summary (generated): {{ incident.generated_summary }}
 
               Status: {{ incident.status.value }}
               Severity: {{ incident.severity }}
 
               Alert Count: {{ incident.alerts_count }}
-              Services: {{ incident.services }}
-              Alert Sources: {{ incident.alert_sources }}
+              Services: {{ keep.replace(keep.join('{{ incident.services }}', ', '), 'null', 'N/A') }}
+              Alert Sources: {{ keep.join('{{ incident.alert_sources }}', ', ') }}
 
               Created: {{ incident.creation_time }}
               Started: {{ incident.start_time }}
@@ -39,14 +40,25 @@ workflow:
               Keep Incident ID: {{ incident.id }}
               Assignee: {{ incident.assignee }}
 
-              Alerts:
-              {{ incident.alerts }}
+              Primary Alert:
+              - Name: {{ keep.get_alert_field(incident, 'name', 'N/A', 0) }}
+              - Status: {{ keep.get_alert_field(incident, 'status', 'N/A', 0) }}
+              - Severity: {{ keep.get_alert_field(incident, 'severity', 'N/A', 0) }}
+              - Service: {{ keep.get_alert_field(incident, 'service', 'N/A', 0) }}
+              - Source: {{ keep.get_alert_field(incident, 'source', 'N/A', 0) }}
+              - Fingerprint: {{ keep.get_alert_field(incident, 'fingerprint', 'N/A', 0) }}
+
+              Alert Message:
+              {{ keep.get_alert_field(incident, 'message', 'N/A', 0) }}
+
+              Alert Description:
+              {{ keep.get_alert_field(incident, 'description', 'N/A', 0) }}
           enrich_incident:
             - key: pagerduty_incident_id
               value: results.incident.id
 
     - name: log-pagerduty-created
-      if: "{{ incident.status.value }} == 'firing' and {{ incident.pagerduty_incident_id }} == ''"
+      if: "{{ actions.create-pagerduty-incident.results.incident.id }} != ''"
       provider:
         type: console
         with:
