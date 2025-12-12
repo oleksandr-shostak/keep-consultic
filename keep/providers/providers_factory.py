@@ -635,7 +635,9 @@ class ProvidersFactory:
                     can_query=False,
                     tags=["alert"],
                 )
-            provider = provider.copy()
+            # Use a deep copy to avoid mutating cached provider definitions
+            # (e.g., when we append tags for linked providers).
+            provider = provider.copy(deep=True)
             provider.linked = True
             provider.id = provider_id
             # Linked providers are inferred from ingested alerts, so they should always be treated

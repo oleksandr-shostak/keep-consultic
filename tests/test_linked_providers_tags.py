@@ -47,3 +47,6 @@ def test_linked_providers_always_include_alert_tag():
     assert jira.id == "jira-linked-1"
     assert jira.tags == ["ticketing", "alert"]
 
+    # Ensure we didn't mutate cached/static provider definitions.
+    assert available_providers[0].tags == []
+    assert available_providers[1].tags == ["ticketing"]
