@@ -117,7 +117,13 @@ class ContextManager:
         self.workflow_inputs = inputs
 
     def set_event_context(self, event):
-        self.event_context = event
+        # Convert AlertDto to dict so Chevron can properly access all fields
+        # This fixes issue where Pydantic BaseModel attributes aren't accessible in Mustache templates
+        from keep.api.models.alert import AlertDto
+        if isinstance(event, AlertDto):
+            self.event_context = event.dict()
+        else:
+            self.event_context = event
 
     def set_incident_context(self, incident):
         self.incident_context = incident

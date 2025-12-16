@@ -369,13 +369,21 @@ class PagerdutyProvider(
             severity = "critical"
             # try to get it automatically from the context (if there's an alert, for example)
             if self.context_manager.event_context:
-                severity = self.context_manager.event_context.severity
+                # Handle both dict and AlertDto cases for event_context
+                if isinstance(self.context_manager.event_context, dict):
+                    severity = self.context_manager.event_context.get("severity")
+                else:
+                    severity = self.context_manager.event_context.severity
 
         if not event_type:
             event_type = "trigger"
             # try to get it automatically from the context (if there's an alert, for example)
             if self.context_manager.event_context:
-                status = self.context_manager.event_context.status
+                # Handle both dict and AlertDto cases for event_context
+                if isinstance(self.context_manager.event_context, dict):
+                    status = self.context_manager.event_context.get("status")
+                else:
+                    status = self.context_manager.event_context.status
                 event_type = PagerdutyProvider.ALERT_STATUS_TO_EVENT_TYPE_MAP.get(
                     status, "trigger"
                 )
@@ -385,12 +393,20 @@ class PagerdutyProvider(
             dedup = str(datetime.datetime.now().timestamp())
             # Try to get it from the context (if there's an alert, for example)
             if self.context_manager.event_context:
-                dedup = self.context_manager.event_context.fingerprint
+                # Handle both dict and AlertDto cases for event_context
+                if isinstance(self.context_manager.event_context, dict):
+                    dedup = self.context_manager.event_context.get("fingerprint")
+                else:
+                    dedup = self.context_manager.event_context.fingerprint
 
         if not source:
             source = "custom_event"
             if self.context_manager.event_context:
-                source = self.context_manager.event_context.service or "custom_event"
+                # Handle both dict and AlertDto cases for event_context
+                if isinstance(self.context_manager.event_context, dict):
+                    source = self.context_manager.event_context.get("service") or "custom_event"
+                else:
+                    source = self.context_manager.event_context.service or "custom_event"
 
         payload = {
             "routing_key": routing_key,

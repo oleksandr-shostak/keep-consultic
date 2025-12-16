@@ -225,7 +225,11 @@ class BaseProvider(metaclass=abc.ABCMeta):
                 fingerprint = foreach_context.get("fingerprint")
             # in case the foreach itself doesn't have a fingerprint, use the event fingerprint
             elif self.context_manager.event_context:
-                fingerprint = self.context_manager.event_context.fingerprint
+                # Handle both dict and AlertDto cases for event_context
+                if isinstance(self.context_manager.event_context, dict):
+                    fingerprint = self.context_manager.event_context.get("fingerprint")
+                else:
+                    fingerprint = self.context_manager.event_context.fingerprint
             else:
                 self.logger.warning(
                     "No fingerprint found for alert enrichment",

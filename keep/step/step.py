@@ -99,7 +99,11 @@ class Step:
             self.context_manager, throttling_type, throttling_config
         )
         workflow_id = self.context_manager.get_workflow_id()
-        event_id = self.context_manager.event_context.event_id
+        # Handle both dict and AlertDto cases for event_context
+        if isinstance(self.context_manager.event_context, dict):
+            event_id = self.context_manager.event_context.get("event_id")
+        else:
+            event_id = self.context_manager.event_context.event_id
         return throttle.check_throttling(action_name, workflow_id, event_id)
 
     def _get_foreach_items(self) -> list | list[list]:
