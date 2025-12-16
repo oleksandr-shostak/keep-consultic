@@ -956,7 +956,17 @@ class KeepProvider(BaseProvider):
                 continue
 
             # Check if the value might contain a ternary expression
+            # More sophisticated check: only process if it looks like a ternary expression
+            # and NOT like a URL or other text with ? and :
             if "?" in value and ":" in value:
+                # Skip if this looks like a URL (contains :// or ?param=)
+                if "://" in value or "?url=" in value.lower() or "?id=" in value.lower():
+                    continue
+
+                # Skip if the string is very long (likely content, not an expression)
+                if len(value) > 500:
+                    continue
+
                 try:
                     aeval = Interpreter()
                     result = evaluate_ternary(value, aeval)
