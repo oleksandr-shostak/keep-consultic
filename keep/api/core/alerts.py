@@ -217,17 +217,32 @@ static_facets = [
 static_facets_dict = {facet.id: facet for facet in static_facets}
 
 
-def get_threeshold_query(tenant_id: str):
-    return func.coalesce(
+def get_threeshold_query(tenant_id: str, sql_filter: str = None):
+    threshold_query = (
         select(LastAlert.timestamp)
         .select_from(LastAlert)
         .where(LastAlert.tenant_id == tenant_id)
+    )
+
+    # If there's a SQL filter, we need to join with Alert table to apply provider_type filter
+    if sql_filter and "alert.provider_type" in sql_filter:
+        threshold_query = threshold_query.join(
+            Alert,
+            and_(
+                Alert.id == LastAlert.alert_id,
+                Alert.tenant_id == LastAlert.tenant_id
+            )
+        ).where(text(sql_filter))
+
+    threshold_query = (
+        threshold_query
         .order_by(LastAlert.timestamp.desc())
         .limit(1)
         .offset(alerts_hard_limit - 1)
-        .scalar_subquery(),
-        datetime.datetime.min,
+        .scalar_subquery()
     )
+
+    return func.coalesce(threshold_query, datetime.datetime.min)
 
 
 def __build_query_for_filtering(
@@ -305,7 +320,7 @@ def __build_query_for_filtering(
         )
 
     sql_query = sql_query.filter(LastAlert.tenant_id == tenant_id).filter(
-        LastAlert.timestamp >= get_threeshold_query(tenant_id)
+        LastAlert.timestamp >= get_threeshold_query(tenant_id, sql_filter)
     )
     involved_fields = []
 
