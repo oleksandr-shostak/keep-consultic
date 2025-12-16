@@ -284,7 +284,7 @@ class PagerdutyProvider(
         }
 
     def __get_headers(self, **kwargs):
-        if self.authentication_config.api_key or self.authentication_config.routing_key:
+        if self.authentication_config.api_key:
             return {
                 "Accept": "application/vnd.pagerduty+json;version=2",
                 "Content-Type": "application/json",
@@ -297,6 +297,7 @@ class PagerdutyProvider(
                 "Authorization": f"Bearer {self.authentication_config.oauth_data['access_token']}",
                 "Content-Type": "application/json",
             }
+        return {}
 
     def validate_scopes(self):
         """
@@ -623,8 +624,8 @@ class PagerdutyProvider(
     ):
         self.logger.info("Setting up Pagerduty webhook")
 
-        if self.authentication_config.routing_key:
-            self.logger.info("Skipping webhook setup due to routing key")
+        if not (self.authentication_config.api_key or self.authentication_config.oauth_data):
+            self.logger.info("Skipping webhook setup due to missing API key / OAuth")
             return
 
         headers = self.__get_headers()
@@ -734,19 +735,15 @@ class PagerdutyProvider(
             resolution (str): Resolution note for resolved incidents
             kwargs (dict): Additional event/incident fields
         """
-        if not routing_key: # If routing_key not specified in workflow, fallback to config routing_key
-            routing_key = self.authentication_config.routing_key
-        if  routing_key:
-            return self._send_alert(
-                title,
-                dedup=dedup,
-                event_type=event_type,
-                routing_key=routing_key,
-                source=source,
-                severity=severity,
-                **kwargs,
-            )
-        else:
+        # Prefer the Incidents API when incident-related fields are provided; otherwise fall back to
+        # the Events API when a routing_key is available.
+        use_incidents_api = bool(service_id or incident_id or status or resolution or priority)
+
+        if use_incidents_api:
+            if not (self.authentication_config.api_key or self.authentication_config.oauth_data):
+                raise ProviderConfigException(
+                    "PagerDuty incidents API requires api_key or OAuth authentication"
+                )
             incident_body = body or kwargs.get("body") or kwargs.get("alert_body")
             return self._trigger_incident(
                 service_id,
@@ -759,6 +756,23 @@ class PagerdutyProvider(
                 status,
                 resolution,
             )
+
+        if not routing_key:  # If routing_key not specified in workflow, fallback to config routing_key
+            routing_key = self.authentication_config.routing_key
+        if not routing_key:
+            raise ProviderConfigException(
+                "PagerDuty events API requires routing_key authentication"
+            )
+
+        return self._send_alert(
+            title,
+            dedup=dedup,
+            event_type=event_type,
+            routing_key=routing_key,
+            source=source,
+            severity=severity,
+            **kwargs,
+        )
 
     def _query(self, incident_id: str = None, incident_key: str = None):
         if incident_id:
@@ -1087,8 +1101,8 @@ class PagerdutyProvider(
         return list(service_topology.values()), {}
 
     def _get_incidents(self) -> list[IncidentDto]:
-        # Skipping incidents pulling when we're installed with routing_key
-        if self.authentication_config.routing_key:
+        # Skipping incidents pulling when we don't have credentials for the Incidents API
+        if not (self.authentication_config.api_key or self.authentication_config.oauth_data):
             return []
 
         raw_incidents = self.__get_all_incidents_or_alerts()
@@ -1139,7 +1153,78 @@ class PagerdutyProvider(
         event: dict, provider_instance: "BaseProvider" = None
     ) -> IncidentDto | list[IncidentDto]:
 
-        event = event["event"]["data"]
+        def _parse_datetime(value: typing.Any) -> datetime.datetime | None:
+            if not value:
+                return None
+            if isinstance(value, datetime.datetime):
+                return value
+            if isinstance(value, str):
+                normalized = value
+                if normalized.endswith("Z"):
+                    normalized = normalized[:-1] + "+00:00"
+                try:
+                    parsed = datetime.datetime.fromisoformat(normalized)
+                except ValueError:
+                    for fmt in (
+                        "%Y-%m-%dT%H:%M:%S.%f%z",
+                        "%Y-%m-%dT%H:%M:%S%z",
+                        "%Y-%m-%dT%H:%M:%S",
+                        "%Y-%m-%d %H:%M:%S",
+                    ):
+                        try:
+                            parsed = datetime.datetime.strptime(value, fmt)
+                            break
+                        except ValueError:
+                            parsed = None
+                    if parsed is None:
+                        raise
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+                return parsed
+            return None
+
+        def _extract_incident_payload(raw: dict) -> tuple[dict | None, str | None]:
+            """
+            Supports PagerDuty webhooks v3 (messages[]) and legacy formats.
+
+            Returns:
+                (incident_payload, message_created_on)
+            """
+            if not isinstance(raw, dict):
+                return None, None
+
+            if "incident" in raw and isinstance(raw["incident"], dict):
+                return raw["incident"], raw.get("created_on") or raw.get("created_at")
+
+            if "event" in raw and isinstance(raw["event"], dict):
+                data = raw["event"].get("data")
+                if isinstance(data, dict):
+                    # Some payloads wrap incident under data.incident
+                    if "incident" in data and isinstance(data["incident"], dict):
+                        return data["incident"], raw.get("created_on") or data.get(
+                            "created_at"
+                        )
+                    return data, raw.get("created_on") or data.get("created_at")
+
+            return raw, raw.get("created_on") or raw.get("created_at")
+
+        if isinstance(event, dict) and isinstance(event.get("messages"), list):
+            incidents: list[IncidentDto] = []
+            for message in event.get("messages", []):
+                incident_payload, message_created_on = _extract_incident_payload(message)
+                if not incident_payload:
+                    continue
+                formatted = PagerdutyProvider._format_incident(
+                    {"event": {"data": incident_payload}, "created_on": message_created_on}
+                )
+                if isinstance(formatted, list):
+                    incidents.extend(formatted)
+                elif formatted:
+                    incidents.append(formatted)
+            return incidents
+
+        incident_payload, message_created_on = _extract_incident_payload(event)
+        event = incident_payload or {}
 
         # This will be the same for the same incident
         original_incident_id = event.get("id")
@@ -1164,10 +1249,8 @@ class PagerdutyProvider(
         )
         service = event.pop("service", {}).get("summary", "unknown")
 
-        created_at = event.get("created_at")
-        if created_at:
-            created_at = datetime.datetime.fromisoformat(created_at)
-        else:
+        created_at = _parse_datetime(message_created_on or event.get("created_at"))
+        if not created_at:
             created_at = datetime.datetime.now(tz=datetime.timezone.utc)
 
         title = event.get("title")

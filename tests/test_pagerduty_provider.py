@@ -18,6 +18,29 @@ class TestPagerdutyProvider(unittest.TestCase):
         self.assertEqual(formatted_alert.status, IncidentStatus.FIRING)
         self.assertEqual(formatted_alert.alert_sources, ["pagerduty"])
 
+    def test_format_incident_webhook_v3_messages(self):
+        with open(os.path.join(os.path.dirname(__file__), "test.json"), "r") as f:
+            data = json.load(f)
+
+        resolved_incident = dict(data)
+        resolved_incident["status"] = "resolved"
+
+        webhook_payload = {
+            "messages": [
+                {
+                    "event": "incident.resolved",
+                    "created_on": "2024-07-07T12:40:00Z",
+                    "incident": resolved_incident,
+                }
+            ]
+        }
+
+        formatted = PagerdutyProvider._format_incident(webhook_payload)
+        self.assertIsInstance(formatted, list)
+        self.assertEqual(len(formatted), 1)
+        self.assertEqual(formatted[0].status, IncidentStatus.RESOLVED)
+        self.assertEqual(formatted[0].severity, IncidentSeverity.WARNING)
+
 
 if __name__ == "__main__":
     unittest.main()
