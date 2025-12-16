@@ -224,15 +224,11 @@ def get_threeshold_query(tenant_id: str, sql_filter: str = None):
         .where(LastAlert.tenant_id == tenant_id)
     )
 
-    # If there's a SQL filter, we need to join with Alert table to apply provider_type filter
-    if sql_filter and "alert.provider_type" in sql_filter:
-        threshold_query = threshold_query.join(
-            Alert,
-            and_(
-                Alert.id == LastAlert.alert_id,
-                Alert.tenant_id == LastAlert.tenant_id
-            )
-        ).where(text(sql_filter))
+    # If there's a SQL filter (like provider_type filtering), skip the threshold entirely
+    # to avoid MySQL sort buffer issues with LIMIT offset on filtered results.
+    # This means filtered queries will return all matching alerts without the 50k limit.
+    if sql_filter:
+        return datetime.datetime.min
 
     threshold_query = (
         threshold_query
