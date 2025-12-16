@@ -602,14 +602,16 @@ class KeepProvider(BaseProvider):
                     extra={"alert_data": alert_data},
                 )
                 rendered_alert_data = alert_data
+            # Log rendered alert data with message details
+            msg_value = rendered_alert_data.get("message")
+            msg_len = len(msg_value) if msg_value else 0
             self.logger.info(
-                "Rendered alert data",
+                f"Rendered alert data - message exists: {'message' in rendered_alert_data}, "
+                f"message is None: {msg_value is None}, message length: {msg_len}",
                 extra={
                     "original": alert_data,
                     "rendered": rendered_alert_data,
-                    "message_in_rendered": "message" in rendered_alert_data,
-                    "message_value": rendered_alert_data.get("message"),
-                    "message_length": len(rendered_alert_data.get("message", "")) if rendered_alert_data.get("message") else 0,
+                    "message_value_preview": msg_value[:200] if msg_value else None,
                 },
             )
             # render tenrary expressions
