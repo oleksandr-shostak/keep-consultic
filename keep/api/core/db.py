@@ -1713,6 +1713,37 @@ def get_enrichments(
     return result
 
 
+def get_incident_id_by_enrichment_value(
+    tenant_id: str,
+    enrichment_key: str,
+    enrichment_value: str,
+    session: Optional[Session] = None,
+) -> UUID | None:
+    """
+    Find a Keep incident id by looking up an entity enrichment key/value.
+
+    This is useful for mapping external incidents (e.g. PagerDuty) back to an
+    existing Keep incident that already stored the external id in its enrichments.
+    """
+    if not enrichment_key or enrichment_value is None:
+        return None
+
+    with existed_or_new_session(session) as session:
+        enrichment_field = get_json_extract_field(
+            session, AlertEnrichment.enrichments, enrichment_key
+        )
+        matched_fingerprint = session.exec(
+            select(AlertEnrichment.alert_fingerprint)
+            .where(AlertEnrichment.tenant_id == tenant_id)
+            .where(enrichment_field == enrichment_value)
+        ).first()
+
+        if not matched_fingerprint:
+            return None
+
+        return __convert_to_uuid(str(matched_fingerprint))
+
+
 def get_alerts_with_filters(
     tenant_id,
     provider_id=None,

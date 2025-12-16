@@ -4,8 +4,13 @@ from arq import Retry
 from sqlmodel import Session
 
 from keep.api.bl.incidents_bl import IncidentBl
-from keep.api.core.db import engine, get_incident_by_fingerprint, get_incident_by_id
-from keep.api.models.incident import IncidentDto
+from keep.api.core.db import (
+    engine,
+    get_incident_by_fingerprint,
+    get_incident_by_id,
+    get_incident_id_by_enrichment_value,
+)
+from keep.api.models.incident import IncidentDto, IncidentDtoIn
 from keep.api.tasks.process_event_task import process_event
 
 TIMES_TO_RETRY_JOB = 5  # the number of times to retry the job in case of failure
@@ -51,6 +56,7 @@ def process_incident(
                     extra={**extra, "fingerprint": incident.fingerprint},
                 )
 
+                use_provider_payload_update = True
                 incident_from_db = get_incident_by_id(
                     tenant_id=tenant_id, incident_id=incident.id, session=session
                 )
@@ -63,14 +69,50 @@ def process_incident(
                         session=session,
                     )
 
+                # If this incident is coming from a provider webhook, it might represent an external
+                # incident that we already synced out from an existing Keep incident (stored as an
+                # enrichment like "<provider>_incident_id"). In that case, update the existing Keep
+                # incident instead of creating a duplicate "mirror" incident.
+                if incident_from_db is None and incident.fingerprint:
+                    enrichment_key = f"{provider_type}_incident_id"
+                    mapped_incident_id = get_incident_id_by_enrichment_value(
+                        tenant_id=tenant_id,
+                        enrichment_key=enrichment_key,
+                        enrichment_value=incident.fingerprint,
+                        session=session,
+                    )
+                    if mapped_incident_id:
+                        mapped_incident = get_incident_by_id(
+                            tenant_id=tenant_id,
+                            incident_id=mapped_incident_id,
+                            session=session,
+                        )
+                        if mapped_incident is not None:
+                            incident_from_db = mapped_incident
+                            use_provider_payload_update = False
+                            logger.info(
+                                "Mapped provider incident to existing Keep incident via enrichment",
+                                extra={
+                                    **extra,
+                                    "provider_incident_id": incident.fingerprint,
+                                    "enrichment_key": enrichment_key,
+                                    "mapped_incident_id": str(mapped_incident_id),
+                                },
+                            )
+
                 if incident_from_db:
                     logger.info(
                         f"Updating incident: {incident.id}",
                         extra={**extra, "fingerprint": incident.fingerprint},
                     )
+                    updated_incident_dto = (
+                        incident
+                        if use_provider_payload_update
+                        else IncidentDtoIn(status=incident.status)
+                    )
                     incident_from_db = incident_bl.update_incident(
                         incident_id=incident_from_db.id,
-                        updated_incident_dto=incident,
+                        updated_incident_dto=updated_incident_dto,
                         generated_by_ai=False,
                     )
                     logger.info(
@@ -92,7 +134,7 @@ def process_incident(
                     )
 
                 try:
-                    if incident.alerts:
+                    if use_provider_payload_update and incident.alerts:
                         logger.info("Adding incident alerts", extra=extra)
                         processed_alerts = process_event(
                             {},

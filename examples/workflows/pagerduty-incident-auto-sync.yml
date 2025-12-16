@@ -11,7 +11,8 @@ workflow:
   actions:
     - name: create-pagerduty-incident
       # Create only once (avoid duplicates on incident updates)
-      if: "{{ incident.status.value }} == 'firing' and {{ incident.pagerduty_incident_id }} == ''"
+      # Only sync high/critical incidents to PagerDuty
+      if: "{{ incident.status.value }} == 'firing' and {{ incident.severity.value }} in ['critical','high'] and {{ incident.pagerduty_incident_id }} == ''"
       provider:
         type: pagerduty
         config: "{{ providers.pagerduty }}"
