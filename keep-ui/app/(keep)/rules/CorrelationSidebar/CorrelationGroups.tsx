@@ -18,7 +18,7 @@ export const CorrelationGroups = () => {
         <Button
           className="cursor-default"
           type="button"
-          tooltip="A Rule contains one or more Correlations, each evaluating a separate alert group. Results are combined using an AND operator. For instance, to group alerts by severity 'critical' and source 'Kibana', create two alert groups: one with severity = 'critical' and another with source = 'Kibana'."
+          tooltip="A correlation can include one or more alert groups. Conditions within a group are combined with AND, and groups are combined with OR."
           icon={QuestionMarkCircleIcon}
           size="xs"
           variant="light"

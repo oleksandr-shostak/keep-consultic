@@ -1,5 +1,6 @@
 import { convertCelAstToQueryBuilderAst } from "./convert-cel-ast-to-query-builder-ast.function";
 import { CelAst } from "@/utils/cel-ast";
+import { formatQuery } from "react-querybuilder";
 
 describe("convertCelAstToQueryBuilderAst", () => {
   it("should convert a LogicalNode with AND operator", () => {
@@ -23,7 +24,7 @@ describe("convertCelAstToQueryBuilderAst", () => {
     const result = convertCelAstToQueryBuilderAst(logicalNode);
 
     expect(result).toEqual({
-      combinator: "and",
+      combinator: "or",
       rules: [
         {
           combinator: "and",
@@ -44,6 +45,25 @@ describe("convertCelAstToQueryBuilderAst", () => {
         },
       ],
     });
+  });
+
+  it("should serialize multiple groups as OR in CEL", () => {
+    const comparisonNode: CelAst.ComparisonNode = {
+      node_type: "ComparisonNode",
+      first_operand: { path: ["field1"] } as CelAst.PropertyAccessNode,
+      operator: CelAst.ComparisonNodeOperator.EQ,
+      second_operand: { value: "value1" },
+    };
+
+    const query = convertCelAstToQueryBuilderAst(comparisonNode);
+
+    query.rules.push({
+      combinator: "and",
+      rules: [{ field: "field2", operator: "=", value: "value2", id: "r2" }],
+    } as any);
+
+    const cel = formatQuery(query as any, "cel");
+    expect(cel).toMatch(/\\|\\|/);
   });
 
   it("should convert a LogicalNode with OR operator", () => {
@@ -171,7 +191,7 @@ describe("convertCelAstToQueryBuilderAst", () => {
     const result = convertCelAstToQueryBuilderAst(comparisonNode);
 
     expect(result).toEqual({
-      combinator: "and",
+      combinator: "or",
       rules: [
         {
           combinator: "and",
@@ -208,7 +228,7 @@ describe("convertCelAstToQueryBuilderAst", () => {
       const result = convertCelAstToQueryBuilderAst(comparisonNode);
 
       expect(result).toEqual({
-        combinator: "and",
+        combinator: "or",
         rules: [
           {
             combinator: "and",
@@ -239,7 +259,7 @@ describe("convertCelAstToQueryBuilderAst", () => {
     const result = convertCelAstToQueryBuilderAst(comparisonNode);
 
     expect(result).toEqual({
-      combinator: "and",
+      combinator: "or",
       rules: [
         {
           combinator: "and",
@@ -270,7 +290,7 @@ describe("convertCelAstToQueryBuilderAst", () => {
     const result = convertCelAstToQueryBuilderAst(unaryNode);
 
     expect(result).toEqual({
-      combinator: "and",
+      combinator: "or",
       rules: [
         {
           combinator: "and",
@@ -308,7 +328,7 @@ describe("convertCelAstToQueryBuilderAst", () => {
       const result = convertCelAstToQueryBuilderAst(unaryNode);
 
       expect(result).toEqual({
-        combinator: "and",
+        combinator: "or",
         rules: [
           {
             combinator: "and",

@@ -11,6 +11,9 @@ export const RuleGroup = ({ actions, ruleGroup }: QueryRuleGroupProps) => {
   const { rules } = ruleGroup;
 
   const onAddGroupClick = () => {
+    // The UI renders groups as being combined by OR. Ensure the underlying query
+    // matches that so we don't serialize `&&` while displaying "OR".
+    onPropChange("combinator", "or", []);
     return onGroupAdd(
       {
         combinator: "and",
@@ -26,7 +29,11 @@ export const RuleGroup = ({ actions, ruleGroup }: QueryRuleGroupProps) => {
         // we only want rule groups to be rendered
         typeof rule === "object" && "combinator" in rule ? (
           <div key={groupIndex}>
-            <div className="mb-2">{groupIndex > 0 ? "OR" : ""}</div>
+            <div className="mb-2">
+              {groupIndex > 0
+                ? String(ruleGroup.combinator ?? "or").toUpperCase()
+                : ""}
+            </div>
             <RuleFields
               rule={
                 rule as RuleGroupType<

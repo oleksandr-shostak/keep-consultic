@@ -194,7 +194,10 @@ export function convertCelAstToQueryBuilderAst(
 
   if (rulesGroup.combinator == "and") {
     rulesGroup = {
-      combinator: "and",
+      // The Correlation UI treats top-level groups as alternatives (OR),
+      // and each group itself as conjunctions (AND). Wrapping AND-only
+      // expressions in an outer OR group keeps the UI and serialization aligned.
+      combinator: "or",
       rules: [rulesGroup],
     };
   }
