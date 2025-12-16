@@ -1,0 +1,22 @@
+workflow:
+  id: test_description_simple
+  name: "Test Description Field"
+  description: Simple test to see if description is available
+  disabled: false
+  triggers:
+    - type: alert
+      cel: "providerType == 'mailgun' && severity == 'info'"
+
+  steps:
+    - name: log_description
+      provider:
+        type: console
+        with:
+          message: |
+            Testing description field:
+            Alert ID: {{ alert.id }}
+            Alert Name: {{ alert.name }}
+            Description exists: {{ alert.description != null }}
+            Description length: {{ alert.description | length if alert.description else 0 }}
+            First 200 chars of description: {{ keep.slice(alert.description, 0, 200) if alert.description else 'NULL' }}
+            First 200 chars of message: {{ keep.slice(alert.message, 0, 200) if alert.message else 'NULL' }}

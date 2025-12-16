@@ -1,0 +1,30 @@
+workflow:
+  id: ai_alert_triage_debug
+  name: "Debug: What context is available"
+  description: Debug workflow to see what variables are available
+  disabled: false
+  triggers:
+    - type: alert
+      cel: "providerType == 'mailgun' && severity == 'info'"
+
+  steps:
+    - name: debug_step
+      provider:
+        type: console
+        with:
+          message: |
+            DEBUG: Alert in step context:
+            - alert.id: {{ alert.id }}
+            - alert.name: {{ alert.name }}
+            - alert.description: {{ alert.description }}
+
+  actions:
+    - name: debug_action
+      provider:
+        type: console
+        with:
+          message: |
+            DEBUG: Alert in action context:
+            - alert.id: {{ alert.id }}
+            - alert.name: {{ alert.name }}
+            - alert.description: {{ alert.description }}

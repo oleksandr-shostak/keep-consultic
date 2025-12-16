@@ -1,0 +1,82 @@
+workflow:
+  id: ai_alert_triage_openai_enrich
+  name: "AI Alert Triage with OpenAI (Enrich Approach)"
+  description: Use OpenAI to analyze and enrich alerts instead of creating new ones
+  disabled: false
+  triggers:
+    - type: alert
+      cel: "providerType == 'mailgun' && severity == 'info'"
+
+  steps:
+    - name: ai_analyze_alert
+      provider:
+        type: openaiassistant
+        config: "{{ providers.Triage }}"
+        with:
+          prompt: |
+            Analyze this alert and decide if it's important:
+            **Alert Name:** {{ alert.name }}
+            - Source: {{ alert.source }}
+            **Status:** {{ alert.status }}
+            **Description:** {{ keep.slice(alert.description, 0, 1000) }}
+
+            Determine if this alert should be:
+            1. ESCALATED to critical priority (production outages, security issues, data loss, critical service failures)
+            2. RESOLVED as noise/informational (test alerts, informational messages, auto-recovered issues, duplicates)
+
+            Respond ONLY with valid JSON in this exact format:
+
+            {"recommended_action": "resolve", "reason": "brief explanation"}
+            OR
+            {"recommended_action": "escalate", "reason": "brief explanation"}
+          max_wait_time: 60
+          parse_json: true
+
+    # Enrich the alert with AI analysis
+    - name: add_ai_analysis
+      provider:
+        type: keep
+        config: "{{ providers.default-keep }}"
+        with:
+          version: 2
+          filter: "fingerprint == '{{ alert.fingerprint }}'"
+          limit: 1
+          enrich_alert:
+            - key: ai_recommendation
+              value: "{{ steps.ai_analyze_alert.results.response.recommended_action }}"
+            - key: ai_reason
+              value: "{{ steps.ai_analyze_alert.results.response.reason }}"
+            - key: ai_analysis_time
+              value: "{{ now }}"
+
+    # Escalate severity if AI recommends
+    - name: escalate_severity
+      if: "'{{ steps.ai_analyze_alert.results.response.recommended_action }}' == 'escalate'"
+      provider:
+        type: keep
+        config: "{{ providers.default-keep }}"
+        with:
+          version: 2
+          filter: "fingerprint == '{{ alert.fingerprint }}'"
+          limit: 1
+          enrich_alert:
+            - key: severity
+              value: "critical"
+            - key: name
+              value: "[AI ESCALATED] {{ alert.name }}"
+
+    # Auto-resolve if AI recommends
+    - name: auto_resolve
+      if: "'{{ steps.ai_analyze_alert.results.response.recommended_action }}' == 'resolve'"
+      provider:
+        type: keep
+        config: "{{ providers.default-keep }}"
+        with:
+          version: 2
+          filter: "fingerprint == '{{ alert.fingerprint }}'"
+          limit: 1
+          enrich_alert:
+            - key: status
+              value: "resolved"
+            - key: resolution_reason
+              value: "AI auto-resolved: {{ steps.ai_analyze_alert.results.response.reason }}"

@@ -470,6 +470,9 @@ class KeepProvider(BaseProvider):
                 extra={
                     "fingerprint": fingerprint,
                     "last_received": new_alert.lastReceived,
+                    "message_is_none": new_alert.message is None,
+                    "message_length": len(new_alert.message) if new_alert.message else 0,
+                    "message_preview": new_alert.message[:200] if new_alert.message else None
                 },
             )
 
@@ -616,8 +619,27 @@ class KeepProvider(BaseProvider):
             )
             # render tenrary expressions
             rendered_alert_data = self._handle_ternary_expressions(rendered_alert_data)
+
+            # Debug: Check message after ternary expressions
+            msg_after_ternary = rendered_alert_data.get("message")
+            self.logger.info(
+                f"After ternary expressions - message is None: {msg_after_ternary is None}, "
+                f"message length: {len(msg_after_ternary) if msg_after_ternary else 0}",
+                extra={"message_preview": msg_after_ternary[:200] if msg_after_ternary else None}
+            )
+
             alert_dto = self._build_alert(
                 alert_result, fingerprint_fields or [], **rendered_alert_data
+            )
+
+            # Debug: Check message in built AlertDto
+            self.logger.info(
+                f"Built AlertDto - message is None: {alert_dto.message is None}, "
+                f"message length: {len(alert_dto.message) if alert_dto.message else 0}",
+                extra={
+                    "message_preview": alert_dto.message[:200] if alert_dto.message else None,
+                    "fingerprint": alert_dto.fingerprint
+                }
             )
             if override_source_with:
                 alert_dto.source = [override_source_with]
@@ -655,6 +677,16 @@ class KeepProvider(BaseProvider):
         self.logger.info(
             "Processing final alerts", extra={"number_of_alerts": len(alerts)}
         )
+        # Debug: Check messages before process_event
+        for idx, alert in enumerate(alerts):
+            self.logger.info(
+                f"Alert {idx} before process_event - message is None: {alert.message is None}, "
+                f"message length: {len(alert.message) if alert.message else 0}",
+                extra={
+                    "fingerprint": alert.fingerprint,
+                    "message_preview": alert.message[:200] if alert.message else None
+                }
+            )
         process_event(
             ctx={},
             tenant_id=self.context_manager.tenant_id,

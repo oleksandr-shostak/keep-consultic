@@ -246,17 +246,51 @@ def __save_to_db(
 
             __validate_last_received(formatted_event)
 
+            # Debug: Check message before dict conversion
+            logger.info(
+                f"Before dict conversion - message is None: {formatted_event.message is None}, "
+                f"message length: {len(formatted_event.message) if formatted_event.message else 0}",
+                extra={
+                    "fingerprint": formatted_event.fingerprint,
+                    "message_preview": formatted_event.message[:200] if formatted_event.message else None
+                }
+            )
+
+            event_dict = formatted_event.dict()
+
+            # Debug: Check message after dict conversion
+            logger.info(
+                f"After dict conversion - message in dict: {'message' in event_dict}, "
+                f"message is None: {event_dict.get('message') is None}, "
+                f"message length: {len(event_dict.get('message')) if event_dict.get('message') else 0}",
+                extra={
+                    "fingerprint": formatted_event.fingerprint,
+                    "message_preview": event_dict.get('message')[:200] if event_dict.get('message') else None
+                }
+            )
+
             alert_args = {
                 "tenant_id": tenant_id,
                 "provider_type": (
                     provider_type if provider_type else formatted_event.source[0]
                 ),
-                "event": formatted_event.dict(),
+                "event": event_dict,
                 "provider_id": provider_id,
                 "fingerprint": formatted_event.fingerprint,
                 "alert_hash": formatted_event.alert_hash,
             }
             alert_args = sanitize_alert(alert_args)
+
+            # Debug: Check message after sanitization
+            logger.info(
+                f"After sanitize_alert - message in event: {'message' in alert_args['event']}, "
+                f"message is None: {alert_args['event'].get('message') is None}, "
+                f"message length: {len(alert_args['event'].get('message')) if alert_args['event'].get('message') else 0}",
+                extra={
+                    "fingerprint": formatted_event.fingerprint,
+                    "message_preview": alert_args['event'].get('message')[:200] if alert_args['event'].get('message') else None
+                }
+            )
             if timestamp_forced is not None:
                 alert_args["timestamp"] = timestamp_forced
 

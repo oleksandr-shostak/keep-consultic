@@ -1,0 +1,139 @@
+workflow:
+  id: ai_alert_triage_openai_debug
+  name: "AI Alert Triage with OpenAI (Debug Version)"
+  description: Use OpenAI to analyze each alert and decide if it's important - WITH DEBUG LOGGING
+  disabled: false
+  triggers:
+    - type: alert
+      cel: "providerType == 'mailgun' && severity == 'info'"
+
+  steps:
+    # Step 0: Debug - Log incoming alert data
+    - name: debug_incoming_alert
+      provider:
+        type: console
+        with:
+          message: |
+            ========================================
+            🔍 DEBUG: INCOMING ALERT DATA
+            ========================================
+            Alert ID: {{ alert.id }}
+            Alert Name: {{ alert.name }}
+            Alert Status: {{ alert.status }}
+            Alert Severity: {{ alert.severity }}
+            Alert Source: {{ alert.source }}
+            Alert Fingerprint: {{ alert.fingerprint }}
+
+            Description Preview (first 500 chars):
+            {{ keep.slice(alert.description, 0, 500) }}
+
+            Description Length: {{ alert.description | length if alert.description else 0 }}
+            Description is null: {{ alert.description is none }}
+            Description is empty string: {{ alert.description == '' }}
+
+            Message Preview (first 500 chars):
+            {{ keep.slice(alert.message, 0, 500) }}
+
+            Full Alert Keys: {{ alert.keys() }}
+            ========================================
+
+    - name: ai_analyze_alert
+      provider:
+        type: openaiassistant
+        config: "{{ providers.Triage }}"
+        with:
+          prompt: |
+            Analyze this alert and decide if it's important:
+            **Alert Name:** {{ alert.name }}
+            - Source: {{ alert.source }}
+            **Status:** {{ alert.status }}
+            **Description:** {{ keep.slice(alert.description, 0, 1000) }}
+
+            Determine if this alert should be:
+            1. ESCALATED to critical priority (production outages, security issues, data loss, critical service failures)
+            2. RESOLVED as noise/informational (test alerts, informational messages, auto-recovered issues, duplicates)
+
+            Respond ONLY with valid JSON in this exact format:
+
+            {"recommended_action": "resolve", "reason": "brief explanation"}
+            OR
+            {"recommended_action": "escalate", "reason": "brief explanation"}
+          max_wait_time: 60
+          parse_json: true
+
+    # Step 2: Debug - Log AI response
+    - name: debug_ai_response
+      provider:
+        type: console
+        with:
+          message: |
+            ========================================
+            🤖 DEBUG: AI ANALYSIS RESPONSE
+            ========================================
+            Recommended Action: {{ steps.ai_analyze_alert.results.response.recommended_action }}
+            Reason: {{ steps.ai_analyze_alert.results.response.reason }}
+
+            Full AI Response: {{ steps.ai_analyze_alert.results.response }}
+            ========================================
+
+  actions:
+    # Action 1: Debug before escalation
+    - name: debug_before_escalate
+      if: "'{{ steps.ai_analyze_alert.results.response.recommended_action }}' == 'escalate'"
+      provider:
+        type: console
+        with:
+          message: |
+            ========================================
+            🚨 DEBUG: PREPARING TO CREATE ESCALATED ALERT
+            ========================================
+            Will create alert with:
+            - Name: AI: {{ alert.name }}
+            - Status: firing
+            - Severity: warning
+            - Fingerprint: ai-{{ alert.id }}-{{ alert.lastReceived }}
+
+            Description field value:
+            Type: {{ alert.description | type if alert.description else 'None' }}
+            Is None: {{ alert.description is none }}
+            Is Empty: {{ alert.description == '' if alert.description is not none else 'N/A' }}
+            Length: {{ alert.description | length if alert.description else 0 }}
+            First 200 chars: {{ keep.slice(alert.description, 0, 200) if alert.description else 'NULL/EMPTY' }}
+
+            Message field value:
+            First 200 chars: {{ keep.slice(alert.message, 0, 200) }}
+            ========================================
+
+    - name: escalate_to_critical
+      if: "'{{ steps.ai_analyze_alert.results.response.recommended_action }}' == 'escalate'"
+      provider:
+        type: keep
+        config: "{{ providers.default-keep }}"
+        with:
+          alert:
+            name: "AI: {{ alert.name }}"
+            status: firing
+            severity: warning
+            message: |
+              AI ESCALATION: This alert has been automatically escalated to CRITICAL priority.
+
+              ⚠️ AI Analysis: {{ steps.ai_analyze_alert.results.response.reason }}
+
+              📋 Original Alert ID: {{ alert.id }}
+            description: "{{ alert.description }}"
+            source: "{{ alert.source }}"
+            fingerprint: "ai-{{ alert.id }}-{{ alert.lastReceived }}"
+
+    # Action 3: Debug after escalation
+    - name: debug_after_escalate
+      if: "'{{ steps.ai_analyze_alert.results.response.recommended_action }}' == 'escalate'"
+      provider:
+        type: console
+        with:
+          message: |
+            ========================================
+            ✅ DEBUG: ESCALATED ALERT CREATED
+            ========================================
+            Action 'escalate_to_critical' completed
+            Check the results above for the created alert
+            ========================================
