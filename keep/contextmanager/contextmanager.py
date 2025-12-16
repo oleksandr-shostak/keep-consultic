@@ -122,6 +122,14 @@ class ContextManager:
         from keep.api.models.alert import AlertDto
         if isinstance(event, AlertDto):
             self.event_context = event.dict()
+            self.logger.info(
+                "Converted AlertDto to dict for template rendering",
+                extra={
+                    "message_in_dict": "message" in self.event_context,
+                    "message_value_type": type(self.event_context.get("message")).__name__,
+                    "message_length": len(self.event_context.get("message", "")) if self.event_context.get("message") else 0,
+                }
+            )
         else:
             self.event_context = event
 

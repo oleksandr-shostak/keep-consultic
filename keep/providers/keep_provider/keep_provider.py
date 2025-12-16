@@ -602,9 +602,15 @@ class KeepProvider(BaseProvider):
                     extra={"alert_data": alert_data},
                 )
                 rendered_alert_data = alert_data
-            self.logger.debug(
+            self.logger.info(
                 "Rendered alert data",
-                extra={"original": alert_data, "rendered": rendered_alert_data},
+                extra={
+                    "original": alert_data,
+                    "rendered": rendered_alert_data,
+                    "message_in_rendered": "message" in rendered_alert_data,
+                    "message_value": rendered_alert_data.get("message"),
+                    "message_length": len(rendered_alert_data.get("message", "")) if rendered_alert_data.get("message") else 0,
+                },
             )
             # render tenrary expressions
             rendered_alert_data = self._handle_ternary_expressions(rendered_alert_data)
