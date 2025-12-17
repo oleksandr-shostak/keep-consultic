@@ -457,6 +457,11 @@ def incident_url(incident_or_id, override_base_url: str | None = None, **kwargs)
 
     Accepts an IncidentDto, dict, UUID, or string id.
     """
+    if isinstance(incident_or_id, str) and incident_or_id in {"incident"}:
+        context_manager = kwargs.get("context_manager")
+        if context_manager and getattr(context_manager, "incident_context", None):
+            incident_or_id = context_manager.incident_context
+
     incident_id = ""
     if isinstance(incident_or_id, dict):
         incident_id = str(incident_or_id.get("id", "") or "")
@@ -477,6 +482,11 @@ def alert_url(alert_or_fingerprint, override_base_url: str | None = None, **kwar
 
     Accepts an AlertDto, dict, or fingerprint string.
     """
+    if isinstance(alert_or_fingerprint, str) and alert_or_fingerprint in {"alert", "event"}:
+        context_manager = kwargs.get("context_manager")
+        if context_manager and getattr(context_manager, "event_context", None):
+            alert_or_fingerprint = context_manager.event_context
+
     fingerprint = ""
     if isinstance(alert_or_fingerprint, dict):
         fingerprint = str(alert_or_fingerprint.get("fingerprint", "") or "")
