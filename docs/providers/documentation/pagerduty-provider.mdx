@@ -81,6 +81,8 @@ Find this page under **Integrations** > **Generic Webhooks (v3)**
 
 The provider uses either the events API or the incidents API to create an alert or an incident. The choice of API to use is determined by the presence of either a routing_key or an api_key.
 
+When using the incidents API, you can pass `incident_key` as an idempotency (dedup) key to look up an existing PagerDuty incident and avoid creating duplicates.
+
 An expired trial while using the free version of PagerDuty may result in the "pagerduty scopes are invalid" error at Keep.
 
 ## Webhook Integration Modifications

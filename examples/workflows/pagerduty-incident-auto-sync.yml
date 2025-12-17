@@ -15,11 +15,13 @@ workflow:
       if: "{{ incident.status.value }} == 'firing' and {{ incident.severity.value }} in ['critical','high'] and {{ incident.pagerduty_incident_id }} == ''"
       provider:
         type: pagerduty
-        config: "{{ providers.pagerduty }}"
+        config: "{{ providers.pagerduty2 }}"
         with:
           service_id: "P7CU6TM"
           title: "{{ incident.name }}"
           requester: "oleksandr.shostak@consultic.com"
+          # Idempotency key: prevents duplicate PagerDuty incidents if this workflow runs multiple times
+          incident_key: "{{ incident.id }}"
           body:
             type: incident_body
             details: |
@@ -57,6 +59,8 @@ workflow:
           enrich_incident:
             - key: pagerduty_incident_id
               value: results.incident.id
+            - key: pagerduty_incident_key
+              value: "{{ incident.id }}"
 
     - name: log-pagerduty-created
       if: "{{ actions.create-pagerduty-incident.results.incident.id }} != ''"
@@ -72,9 +76,10 @@ workflow:
       if: "{{ incident.status.value }} == 'acknowledged' and {{ incident.pagerduty_incident_id }} != ''"
       provider:
         type: pagerduty
-        config: "{{ providers.pagerduty }}"
+        config: "{{ providers.pagerduty2 }}"
         with:
           incident_id: "{{ incident.pagerduty_incident_id }}"
+          incident_key: "{{ incident.id }}"
           service_id: "P7CU6TM"
           title: "{{ incident.name }}"
           requester: "oleksandr.shostak@consultic.com"
@@ -97,9 +102,10 @@ workflow:
       if: "{{ incident.status.value }} == 'resolved' and {{ incident.pagerduty_incident_id }} != ''"
       provider:
         type: pagerduty
-        config: "{{ providers.pagerduty }}"
+        config: "{{ providers.pagerduty2 }}"
         with:
           incident_id: "{{ incident.pagerduty_incident_id }}"
+          incident_key: "{{ incident.id }}"
           service_id: "P7CU6TM"
           title: "{{ incident.name }}"
           requester: "oleksandr.shostak@consultic.com"

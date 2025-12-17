@@ -740,6 +740,7 @@ class PagerdutyProvider(
         routing_key: str = "",
         requester: str = "",
         incident_id: str = "",
+        incident_key: str = "",
         body: dict | str | None = None,
         event_type: typing.Literal["trigger", "acknowledge", "resolve"] | None = None,
         severity: typing.Literal["critical", "error", "warning", "info"] | None = None,
@@ -762,6 +763,7 @@ class PagerdutyProvider(
             body (dict): Body of the incident as per https://developer.pagerduty.com/api-reference/a7d81b0e9200f-create-an-incident#request-body
             requester (str): Email of the user requesting the incident creation
             incident_id (str | None): Key to identify the incident. UUID generated if not provided
+            incident_key (str | None): Incident key (dedup key) to find/upsert incidents without a stored PagerDuty incident id
             priority (str | None): Priority reference ID for incidents
             event_type (str | None): Event type for events API (trigger/acknowledge/resolve)
             severity (str | None): Severity for events API (critical/error/warning/info)
@@ -770,9 +772,29 @@ class PagerdutyProvider(
             resolution (str): Resolution note for resolved incidents
             kwargs (dict): Additional event/incident fields
         """
+        self.logger.info(
+            "PagerDuty notify called",
+            extra={
+                "tenant_id": self.context_manager.tenant_id,
+                "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                "workflow_execution_id": getattr(
+                    self.context_manager, "workflow_execution_id", None
+                ),
+                "service_id": service_id,
+                "incident_id": incident_id,
+                "incident_key": incident_key,
+                "status": status,
+                "has_resolution": bool(resolution),
+                "has_routing_key": bool(routing_key),
+                "has_api_key": bool(bool(self.authentication_config.api_key)),
+                "has_oauth": bool(bool(self.authentication_config.oauth_data)),
+            },
+        )
         # Prefer the Incidents API when incident-related fields are provided; otherwise fall back to
         # the Events API when a routing_key is available.
-        use_incidents_api = bool(service_id or incident_id or status or resolution or priority)
+        use_incidents_api = bool(
+            service_id or incident_id or incident_key or status or resolution or priority
+        )
 
         if use_incidents_api:
             if not (self.authentication_config.api_key or self.authentication_config.oauth_data):
@@ -780,16 +802,17 @@ class PagerdutyProvider(
                     "PagerDuty incidents API requires api_key or OAuth authentication"
                 )
             incident_body = body or kwargs.get("body") or kwargs.get("alert_body")
-            return self._trigger_incident(
-                service_id,
-                title,
-                # Backward-compatible: older workflows used `alert_body`, schema/docs use `body`.
-                incident_body,
-                requester,
-                incident_id,
-                priority,
-                status,
-                resolution,
+            # Backward-compatible: older workflows used `alert_body`, schema/docs use `body`.
+            return self._upsert_or_update_incident(
+                service_id=service_id,
+                title=title,
+                body=incident_body,
+                requester=requester,
+                incident_id=incident_id,
+                incident_key=incident_key,
+                priority=priority,
+                status=status,
+                resolution=resolution,
             )
 
         if not routing_key:  # If routing_key not specified in workflow, fallback to config routing_key
@@ -808,6 +831,341 @@ class PagerdutyProvider(
             severity=severity,
             **kwargs,
         )
+
+    def _upsert_or_update_incident(
+        self,
+        service_id: str,
+        title: str,
+        body: dict | str,
+        requester: str,
+        incident_id: str = "",
+        incident_key: str = "",
+        priority: str = "",
+        status: typing.Literal["resolved", "acknowledged"] = "",
+        resolution: str = "",
+    ) -> dict:
+        """
+        Create/lookup/update a PagerDuty incident via REST API.
+
+        Behavior:
+        - If `incident_id` is provided, updates that PagerDuty incident id.
+        - Else if `incident_key` is provided:
+          - For create-intent calls (no status/resolution), returns an existing incident with that key if present,
+            otherwise creates a new incident with that key.
+          - For update-intent calls (status/resolution), looks up the incident by key and updates it; never creates.
+        - Else creates a new incident with a generated key.
+        """
+        if incident_id:
+            self.logger.info(
+                "PagerDuty incident: updating by incident_id",
+                extra={
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                    "incident_id": incident_id,
+                    "incident_key": incident_key,
+                    "status": status,
+                    "has_resolution": bool(resolution),
+                },
+            )
+            return self._update_incident(
+                incident_id=incident_id,
+                service_id=service_id,
+                title=title,
+                body=body,
+                requester=requester,
+                priority=priority,
+                status=status,
+                resolution=resolution,
+            )
+
+        has_update_intent = bool(status or resolution)
+
+        if incident_key:
+            self.logger.info(
+                "PagerDuty incident: lookup by incident_key",
+                extra={
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                    "incident_key": incident_key,
+                    "has_update_intent": has_update_intent,
+                    "status": status,
+                    "has_resolution": bool(resolution),
+                },
+            )
+            existing = self._get_specific_incident_with_incident_key(incident_key)
+            incidents = existing.get("incidents", []) if isinstance(existing, dict) else []
+
+            if incidents:
+                incident = incidents[0]
+                existing_incident_id = incident.get("id", "")
+                self.logger.info(
+                    "PagerDuty incident: found existing by incident_key",
+                    extra={
+                        "tenant_id": self.context_manager.tenant_id,
+                        "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                        "workflow_execution_id": getattr(
+                            self.context_manager, "workflow_execution_id", None
+                        ),
+                        "incident_key": incident_key,
+                        "incident_id": existing_incident_id,
+                        "will_update": has_update_intent,
+                        "will_return_existing": not has_update_intent,
+                    },
+                )
+                if has_update_intent:
+                    if not existing_incident_id:
+                        raise Exception(
+                            f"PagerDuty incident lookup by incident_key='{incident_key}' did not return an id"
+                        )
+                    return self._update_incident(
+                        incident_id=existing_incident_id,
+                        service_id=service_id,
+                        title=title,
+                        body=body,
+                        requester=requester,
+                        priority=priority,
+                        status=status,
+                        resolution=resolution,
+                    )
+                # Create-intent: return an object compatible with create response (`results.incident.id`)
+                return {"incident": incident, "existing": True}
+
+            if has_update_intent:
+                self.logger.error(
+                    "PagerDuty incident: not found by incident_key; refusing to create on update",
+                    extra={
+                        "tenant_id": self.context_manager.tenant_id,
+                        "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                        "workflow_execution_id": getattr(
+                            self.context_manager, "workflow_execution_id", None
+                        ),
+                        "incident_key": incident_key,
+                        "status": status,
+                        "has_resolution": bool(resolution),
+                    },
+                )
+                raise Exception(
+                    f"PagerDuty incident with incident_key='{incident_key}' not found; refusing to create on update"
+                )
+            self.logger.info(
+                "PagerDuty incident: creating new with incident_key",
+                extra={
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                    "incident_key": incident_key,
+                },
+            )
+            return self._create_incident(
+                service_id=service_id,
+                title=title,
+                body=body,
+                requester=requester,
+                incident_key=incident_key,
+                priority=priority,
+                status=status,
+                resolution=resolution,
+            )
+
+        self.logger.info(
+            "PagerDuty incident: creating new (no incident_id/incident_key provided)",
+            extra={
+                "tenant_id": self.context_manager.tenant_id,
+                "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                "workflow_execution_id": getattr(
+                    self.context_manager, "workflow_execution_id", None
+                ),
+            },
+        )
+        return self._create_incident(
+            service_id=service_id,
+            title=title,
+            body=body,
+            requester=requester,
+            incident_key="",
+            priority=priority,
+            status=status,
+            resolution=resolution,
+        )
+
+    def _create_incident(
+        self,
+        service_id: str,
+        title: str,
+        body: dict | str,
+        requester: str,
+        incident_key: str = "",
+        priority: str = "",
+        status: typing.Literal["resolved", "acknowledged"] = "",
+        resolution: str = "",
+    ) -> dict:
+        if not incident_key:
+            incident_key = str(uuid.uuid4()).replace("-", "")
+
+        url = f"{self.BASE_API_URL}/incidents"
+        headers = self.__get_headers(From=requester)
+
+        if isinstance(body, str):
+            body = json.loads(body)
+            if "details" in body and "type" not in body:
+                body["type"] = "incident_body"
+
+        self.logger.info(
+            "PagerDuty incident: POST /incidents",
+            extra={
+                "tenant_id": self.context_manager.tenant_id,
+                "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                "workflow_execution_id": getattr(
+                    self.context_manager, "workflow_execution_id", None
+                ),
+                "service_id": service_id,
+                "incident_key": incident_key,
+                "status": status,
+            },
+        )
+        payload = {
+            "incident": {
+                "type": "incident",
+                "title": title,
+                "service": {"id": service_id, "type": "service_reference"},
+                "incident_key": incident_key,
+                "body": body,
+            }
+        }
+
+        if status:
+            payload["incident"]["status"] = status
+            if status == "resolved" and resolution:
+                payload["incident"]["resolution"] = resolution
+
+        if priority:
+            payload["incident"]["priority"] = {
+                "id": priority,
+                "type": "priority_reference",
+            }
+
+        r = requests.post(url, headers=headers, data=json.dumps(payload))
+        try:
+            r.raise_for_status()
+            response = r.json()
+            self.logger.info(
+                "Incident created",
+                extra={
+                    "incident_key": incident_key,
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                },
+            )
+            return response
+        except Exception as e:
+            self.logger.error(
+                "Failed to create incident",
+                extra={
+                    "response_text": r.text,
+                    "incident_key": incident_key,
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                },
+            )
+            raise Exception(r.text) from e
+
+    def _update_incident(
+        self,
+        incident_id: str,
+        service_id: str,
+        title: str,
+        body: dict | str,
+        requester: str,
+        priority: str = "",
+        status: typing.Literal["resolved", "acknowledged"] = "",
+        resolution: str = "",
+    ) -> dict:
+        url = f"{self.BASE_API_URL}/incidents/{incident_id}"
+        headers = self.__get_headers(From=requester)
+
+        if isinstance(body, str):
+            body = json.loads(body)
+            if "details" in body and "type" not in body:
+                body["type"] = "incident_body"
+
+        self.logger.info(
+            "PagerDuty incident: PUT /incidents/{incident_id}",
+            extra={
+                "tenant_id": self.context_manager.tenant_id,
+                "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                "workflow_execution_id": getattr(
+                    self.context_manager, "workflow_execution_id", None
+                ),
+                "service_id": service_id,
+                "incident_id": incident_id,
+                "status": status,
+                "has_resolution": bool(resolution),
+            },
+        )
+        payload = {
+            "incident": {
+                "type": "incident",
+                "title": title,
+                "service": {"id": service_id, "type": "service_reference"},
+                "body": body,
+            }
+        }
+
+        if status:
+            payload["incident"]["status"] = status
+            if status == "resolved" and resolution:
+                payload["incident"]["resolution"] = resolution
+
+        if priority:
+            payload["incident"]["priority"] = {
+                "id": priority,
+                "type": "priority_reference",
+            }
+
+        r = requests.put(url, headers=headers, data=json.dumps(payload))
+        try:
+            r.raise_for_status()
+            response = r.json()
+            self.logger.info(
+                "Incident updated",
+                extra={
+                    "incident_id": incident_id,
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                },
+            )
+            return response
+        except Exception as e:
+            self.logger.error(
+                "Failed to update incident",
+                extra={
+                    "response_text": r.text,
+                    "incident_id": incident_id,
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                },
+            )
+            raise Exception(r.text) from e
 
     def _query(self, incident_id: str = None, incident_key: str = None):
         if incident_id:
