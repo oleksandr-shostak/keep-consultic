@@ -572,6 +572,36 @@ class PagerdutyProvider(
             # This will give us a better error message in Keep workflows
             raise Exception(r.text) from e
 
+    def _extract_error_message(self, response: requests.Response) -> str:
+        """
+        Extract a user-friendly error message from PagerDuty API error response.
+
+        Args:
+            response: The failed requests.Response object
+
+        Returns:
+            A formatted error message with details from PagerDuty
+        """
+        try:
+            error_data = response.json()
+            error_obj = error_data.get("error", {})
+
+            # Get the main error message
+            error_message = error_obj.get("message", "Unknown error")
+
+            # Get detailed errors if available
+            errors = error_obj.get("errors", [])
+
+            # Build the error message
+            if errors:
+                error_details = "; ".join(str(e) for e in errors)
+                return f"{error_message} - {error_details}"
+            else:
+                return error_message
+        except Exception:
+            # Fallback to raw response text if JSON parsing fails
+            return f"HTTP {response.status_code}: {response.text[:200]}"
+
     def clean_up(self):
         """
         Clean up the provider.
@@ -586,7 +616,8 @@ class PagerdutyProvider(
         headers = self.__get_headers()
         request = requests.get(self.SUBSCRIPTION_API_URL, headers=headers)
         if not request.ok:
-            raise Exception("Could not get existing webhooks")
+            error_detail = self._extract_error_message(request)
+            raise Exception(f"Could not get existing webhooks: {error_detail}")
         existing_webhooks = request.json().get("webhook_subscriptions", [])
         webhook_exists = next(
             iter(
@@ -606,7 +637,8 @@ class PagerdutyProvider(
                 f"{self.SUBSCRIPTION_API_URL}/{webhook_id}", headers=headers
             )
             if not request.ok:
-                raise Exception("Could not remove existing webhook")
+                error_detail = self._extract_error_message(request)
+                raise Exception(f"Could not remove existing webhook: {error_detail}")
             self.logger.info("Webhook removed", extra={"webhook_id": webhook_id})
 
     def dispose(self):
@@ -631,7 +663,8 @@ class PagerdutyProvider(
         headers = self.__get_headers()
         request = requests.get(self.SUBSCRIPTION_API_URL, headers=headers)
         if not request.ok:
-            raise Exception("Could not get existing webhooks")
+            error_detail = self._extract_error_message(request)
+            raise Exception(f"Could not get existing webhooks: {error_detail}")
         existing_webhooks = request.json().get("webhook_subscriptions", [])
         webhook_exists = next(
             iter(
@@ -683,7 +716,8 @@ class PagerdutyProvider(
                 f"{self.SUBSCRIPTION_API_URL}/{webhook_id}", headers=headers
             )
             if not request.ok:
-                raise Exception("Could not remove existing webhook")
+                error_detail = self._extract_error_message(request)
+                raise Exception(f"Could not remove existing webhook: {error_detail}")
             self.logger.info("Webhook removed", extra={"webhook_id": webhook_id})
 
         self.logger.info("Creating Pagerduty webhook")
@@ -693,8 +727,9 @@ class PagerdutyProvider(
             json=webhook_payload,
         )
         if not request.ok:
-            self.logger.error("Failed to add webhook", extra=request.json())
-            raise Exception("Could not create webhook")
+            error_detail = self._extract_error_message(request)
+            self.logger.error("Failed to add webhook", extra={"error": error_detail, "response": request.json()})
+            raise Exception(f"Could not create webhook: {error_detail}")
         self.logger.info("Webhook created")
 
     def _notify(
