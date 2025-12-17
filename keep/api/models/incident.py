@@ -220,6 +220,8 @@ class IncidentDto(IncidentDtoIn):
 
         if db_incident.enrichments:
             dto = dto.copy(update=db_incident.enrichments)
+            # Pydantic copy() does not preserve private attrs, but incident.alerts relies on _tenant_id.
+            dto._tenant_id = db_incident.tenant_id
 
         return dto
 
