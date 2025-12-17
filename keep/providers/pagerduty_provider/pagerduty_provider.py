@@ -483,25 +483,90 @@ class PagerdutyProvider(
             routing_key = self.authentication_config.routing_key
         if not routing_key:
             raise ProviderConfigException(
-                "PagerDuty alert sync requires routing_key authentication"
+                "PagerDuty alert sync requires a routing_key (Events API v2 integration key); set it in the provider config or pass routing_key in the workflow action"
             )
 
         if merge_into_parent and not (self.authentication_config.api_key or self.authentication_config.oauth_data):
             raise ProviderConfigException(
-                "PagerDuty alert sync merge requires api_key or OAuth authentication"
+                "PagerDuty alert sync merge requires api_key (REST) or OAuth; set it in the provider config"
             )
 
         keep_incident_id = ""
+        expected_alerts_count = 0
         if isinstance(incident_context, dict):
             keep_incident_id = str(incident_context.get("id", "") or "")
             alerts = incident_context.get("alerts") or []
-            previous_synced = incident_context.get("pagerduty_synced_alert_fingerprints") or []
+            previous_synced = (
+                incident_context.get("pagerduty_synced_alert_fingerprints") or []
+            )
+            try:
+                expected_alerts_count = int(incident_context.get("alerts_count") or 0)
+            except Exception:
+                expected_alerts_count = 0
         else:
             keep_incident_id = str(getattr(incident_context, "id", "") or "")
             alerts = getattr(incident_context, "alerts", []) or []
-            previous_synced = getattr(
-                incident_context, "pagerduty_synced_alert_fingerprints", []
-            ) or []
+            previous_synced = (
+                getattr(incident_context, "pagerduty_synced_alert_fingerprints", []) or []
+            )
+            try:
+                expected_alerts_count = int(getattr(incident_context, "alerts_count", 0) or 0)
+            except Exception:
+                expected_alerts_count = 0
+
+        if not isinstance(alerts, list):
+            try:
+                alerts = list(alerts)
+            except Exception:
+                alerts = []
+
+        if not alerts and keep_incident_id and expected_alerts_count > 0:
+            self.logger.warning(
+                "PagerDuty alert sync: incident context has no alerts; attempting DB lookup",
+                extra={
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                    "keep_incident_id": keep_incident_id,
+                    "expected_alerts_count": expected_alerts_count,
+                },
+            )
+            try:
+                from keep.api.core.db import get_incident_alerts_by_incident_id
+                from keep.api.utils.enrichment_helpers import (
+                    convert_db_alerts_to_dto_alerts,
+                )
+
+                db_alerts, _ = get_incident_alerts_by_incident_id(
+                    self.context_manager.tenant_id, keep_incident_id
+                )
+                alerts = convert_db_alerts_to_dto_alerts(db_alerts)
+                self.logger.info(
+                    "PagerDuty alert sync: loaded incident alerts from DB",
+                    extra={
+                        "tenant_id": self.context_manager.tenant_id,
+                        "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                        "workflow_execution_id": getattr(
+                            self.context_manager, "workflow_execution_id", None
+                        ),
+                        "keep_incident_id": keep_incident_id,
+                        "alerts_total": len(alerts),
+                    },
+                )
+            except Exception:
+                self.logger.exception(
+                    "PagerDuty alert sync: failed to load incident alerts from DB",
+                    extra={
+                        "tenant_id": self.context_manager.tenant_id,
+                        "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                        "workflow_execution_id": getattr(
+                            self.context_manager, "workflow_execution_id", None
+                        ),
+                        "keep_incident_id": keep_incident_id,
+                    },
+                )
 
         if isinstance(previous_synced, str):
             try:
@@ -998,15 +1063,35 @@ class PagerdutyProvider(
         result = requests.post(url, json=payload)
         result.raise_for_status()
 
+        response_json: dict | None = None
+        try:
+            response_json = result.json()
+        except Exception:
+            response_json = None
+
         self.logger.info(
             "Sent alert to PagerDuty",
             extra={
+                "tenant_id": self.context_manager.tenant_id,
+                "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                "workflow_execution_id": getattr(
+                    self.context_manager, "workflow_execution_id", None
+                ),
                 "status_code": result.status_code,
-                "response_text": result.text,
-                "routing_key": routing_key,
+                "event_type": event_type,
+                "dedup_key": dedup,
+                "response_status": (
+                    response_json.get("status") if isinstance(response_json, dict) else None
+                ),
+                "response_message": (
+                    response_json.get("message") if isinstance(response_json, dict) else None
+                ),
+                "routing_key_hash": hashlib.sha256(routing_key.encode("utf-8")).hexdigest()[:8]
+                if routing_key
+                else None,
             },
         )
-        return result.json()
+        return response_json or {}
 
     def _trigger_incident(
         self,
