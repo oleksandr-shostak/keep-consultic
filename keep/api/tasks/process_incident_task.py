@@ -99,6 +99,14 @@ def process_incident(
                                     "mapped_incident_id": str(mapped_incident_id),
                                 },
                             )
+                            logger.info(
+                                "Will skip workflows for mapped provider status sync to prevent loops",
+                                extra={
+                                    **extra,
+                                    "provider_incident_id": incident.fingerprint,
+                                    "mapped_incident_id": str(mapped_incident_id),
+                                },
+                            )
 
                 if incident_from_db:
                     logger.info(
@@ -114,6 +122,9 @@ def process_incident(
                         incident_id=incident_from_db.id,
                         updated_incident_dto=updated_incident_dto,
                         generated_by_ai=False,
+                        # Prevent provider->Keep sync updates from re-triggering outbound workflows,
+                        # which can create a PagerDuty <-> Keep infinite loop.
+                        skip_workflow_event=not use_provider_payload_update,
                     )
                     logger.info(
                         f"Updated incident: {incident.id}",

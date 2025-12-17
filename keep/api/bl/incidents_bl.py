@@ -303,6 +303,7 @@ class IncidentBl:
         incident_id: UUID,
         updated_incident_dto: IncidentDtoIn,
         generated_by_ai: bool,
+        skip_workflow_event: bool = False,
     ) -> IncidentDto:
         self.logger.info(
             "Fetching incident",
@@ -314,7 +315,9 @@ class IncidentBl:
         incident = update_incident_from_dto_by_id(
             self.tenant_id, incident_id, updated_incident_dto, generated_by_ai
         )
-        return self.__postprocess_incident_change(incident)
+        return self.__postprocess_incident_change(
+            incident, skip_workflow_event=skip_workflow_event
+        )
 
     def __postprocess_alerts_change(self, incident, alert_fingerprints):
 
@@ -374,7 +377,9 @@ class IncidentBl:
 
         return self.__postprocess_incident_change(incident)
 
-    def __postprocess_incident_change(self, incident):
+    def __postprocess_incident_change(
+        self, incident, skip_workflow_event: bool = False
+    ):
         if not incident:
             raise HTTPException(status_code=404, detail="Incident not found")
 
@@ -385,11 +390,17 @@ class IncidentBl:
             "Client updated on incident change",
             extra={"incident_id": incident.id},
         )
-        self.send_workflow_event(new_incident_dto, "updated")
-        self.logger.info(
-            "Workflows run on incident",
-            extra={"incident_id": incident.id},
-        )
+        if skip_workflow_event:
+            self.logger.info(
+                "Skipping workflows for incident change",
+                extra={"incident_id": incident.id},
+            )
+        else:
+            self.send_workflow_event(new_incident_dto, "updated")
+            self.logger.info(
+                "Workflows run on incident",
+                extra={"incident_id": incident.id},
+            )
         return new_incident_dto
 
     @staticmethod
