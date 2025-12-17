@@ -1266,6 +1266,9 @@ class PagerdutyProvider(
         priority: str = "",
         status: typing.Literal["resolved", "acknowledged"] = "",
         resolution: str = "",
+        sync_incident_alerts_as_alerts: bool = False,
+        merge_into_parent: bool = True,
+        keep_ui_url: str = "",
         **kwargs: dict,
     ):
         """
@@ -1309,9 +1312,8 @@ class PagerdutyProvider(
             },
         )
 
-        sync_incident_alerts = self._is_truthy(
-            kwargs.get("sync_incident_alerts_as_alerts")
-            or kwargs.get("sync_keep_incident_alerts_as_alerts")
+        sync_incident_alerts = self._is_truthy(sync_incident_alerts_as_alerts) or self._is_truthy(
+            kwargs.get("sync_keep_incident_alerts_as_alerts")
             or kwargs.get("sync_incident_alerts_to_alerts")
         )
         if sync_incident_alerts:
@@ -1321,17 +1323,15 @@ class PagerdutyProvider(
                 or kwargs.get("pagerduty_incident_id")
                 or kwargs.get("pd_incident_id")
             )
-            keep_ui_url = (
-                kwargs.get("keep_ui_url")
-                or kwargs.get("keep_url")
+            keep_ui_url_override = keep_ui_url or (
+                kwargs.get("keep_url")
                 or kwargs.get("keep_frontend_url")
             )
-            merge_into_parent = self._is_truthy(kwargs.get("merge_into_parent", True))
             return self._sync_keep_incident_alerts_as_pagerduty_alerts(
                 pagerduty_parent_incident_id=pagerduty_parent_incident_id,
                 requester=requester,
                 routing_key=routing_key,
-                keep_ui_url=keep_ui_url,
+                keep_ui_url=keep_ui_url_override,
                 merge_into_parent=merge_into_parent,
             )
 
