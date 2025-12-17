@@ -483,12 +483,14 @@ class PagerdutyProvider(
             routing_key = self.authentication_config.routing_key
         if not routing_key:
             raise ProviderConfigException(
-                "PagerDuty alert sync requires a routing_key (Events API v2 integration key); set it in the provider config or pass routing_key in the workflow action"
+                "PagerDuty alert sync requires a routing_key (Events API v2 integration key); set it in the provider config or pass routing_key in the workflow action",
+                provider_id=self.provider_id,
             )
 
         if merge_into_parent and not (self.authentication_config.api_key or self.authentication_config.oauth_data):
             raise ProviderConfigException(
-                "PagerDuty alert sync merge requires api_key (REST) or OAuth; set it in the provider config"
+                "PagerDuty alert sync merge requires api_key (REST) or OAuth; set it in the provider config",
+                provider_id=self.provider_id,
             )
 
         keep_incident_id = ""
@@ -1429,7 +1431,8 @@ class PagerdutyProvider(
         if use_incidents_api:
             if not (self.authentication_config.api_key or self.authentication_config.oauth_data):
                 raise ProviderConfigException(
-                    "PagerDuty incidents API requires api_key or OAuth authentication"
+                    "PagerDuty incidents API requires api_key or OAuth authentication",
+                    provider_id=self.provider_id,
                 )
             incident_body = body or kwargs.get("body") or kwargs.get("alert_body")
             # Backward-compatible: older workflows used `alert_body`, schema/docs use `body`.
@@ -1449,7 +1452,8 @@ class PagerdutyProvider(
             routing_key = self.authentication_config.routing_key
         if not routing_key:
             raise ProviderConfigException(
-                "PagerDuty events API requires routing_key authentication"
+                "PagerDuty events API requires routing_key authentication",
+                provider_id=self.provider_id,
             )
 
         return self._send_alert(
