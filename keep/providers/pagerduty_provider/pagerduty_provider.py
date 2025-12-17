@@ -2421,6 +2421,40 @@ class PagerdutyProvider(
         provider_id = getattr(provider_instance, "provider_id", None) if provider_instance else None
 
         incident_key = event.get("incident_key")
+        incident_key_source = "webhook" if incident_key else None
+        api_incident: dict | None = None
+        if (
+            not incident_key
+            and provider_instance
+            and hasattr(provider_instance, "_get_specific_incident")
+        ):
+            try:
+                response = provider_instance._get_specific_incident(original_incident_id)
+                if isinstance(response, dict) and isinstance(response.get("incident"), dict):
+                    api_incident = response["incident"]
+                    incident_key = api_incident.get("incident_key") or incident_key
+                    if incident_key:
+                        incident_key_source = "api"
+                        logger.info(
+                            "PagerDuty incident webhook: loaded incident_key from PagerDuty API",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "provider_id": provider_id,
+                                "pagerduty_incident_id": original_incident_id,
+                                "incident_key": incident_key,
+                                "event_type": event_type,
+                            },
+                        )
+            except Exception:
+                logger.exception(
+                    "PagerDuty incident webhook: failed fetching incident from PagerDuty API",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "provider_id": provider_id,
+                        "pagerduty_incident_id": original_incident_id,
+                        "event_type": event_type,
+                    },
+                )
         if isinstance(incident_key, str) and incident_key.startswith(
             KEEP_PD_ALERT_INCIDENT_KEY_PREFIX
         ):
@@ -2432,6 +2466,7 @@ class PagerdutyProvider(
                     "pagerduty_incident_id": original_incident_id,
                     "incident_key": incident_key,
                     "event_type": event_type,
+                    "incident_key_source": incident_key_source,
                 },
             )
             return []
@@ -2440,20 +2475,30 @@ class PagerdutyProvider(
             if not raw_details:
                 return None
             details = raw_details if isinstance(raw_details, str) else str(raw_details)
-            match = re.search(
+            for pattern in (
+                r"/incidents/("
                 r"[0-9a-fA-F]{8}-"
                 r"[0-9a-fA-F]{4}-"
                 r"[0-9a-fA-F]{4}-"
                 r"[0-9a-fA-F]{4}-"
-                r"[0-9a-fA-F]{12}",
-                details,
-            )
-            if not match:
-                return None
-            try:
-                return uuid.UUID(match.group(0))
-            except Exception:
-                return None
+                r"[0-9a-fA-F]{12}"
+                r")",
+                r"Keep Incident ID:\s*("
+                r"[0-9a-fA-F]{8}-"
+                r"[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{12}"
+                r")",
+            ):
+                match = re.search(pattern, details, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                try:
+                    return uuid.UUID(match.group(1))
+                except Exception:
+                    continue
+            return None
 
         keep_incident_id: uuid.UUID | None = None
         keep_origin_detected_by: str | None = None
@@ -2468,11 +2513,28 @@ class PagerdutyProvider(
         if keep_incident_id is None:
             body = event.get("body")
             details = None
+            details_source = None
             if isinstance(body, dict):
                 details = body.get("details") or body.get("detail") or body.get("summary")
+                if details:
+                    details_source = "webhook_body"
+            if not details and isinstance(api_incident, dict):
+                api_body = api_incident.get("body")
+                if isinstance(api_body, dict):
+                    details = (
+                        api_body.get("details")
+                        or api_body.get("detail")
+                        or api_body.get("summary")
+                    )
+                    if details:
+                        details_source = "api_body"
             keep_incident_id = _extract_keep_incident_id_from_details(details)
             if keep_incident_id is not None:
-                keep_origin_detected_by = "body_details_uuid"
+                keep_origin_detected_by = (
+                    "body_details_keep_url"
+                    if details_source == "webhook_body"
+                    else "api_body_details_keep_url"
+                )
 
         if keep_incident_id is not None:
             if not tenant_id:
@@ -2483,6 +2545,7 @@ class PagerdutyProvider(
                         "provider_id": provider_id,
                         "pagerduty_incident_id": original_incident_id,
                         "incident_key": incident_key,
+                        "incident_key_source": incident_key_source,
                         "event_type": event_type,
                         "keep_incident_id": str(keep_incident_id),
                         "detected_by": keep_origin_detected_by,
@@ -2505,6 +2568,7 @@ class PagerdutyProvider(
                         "provider_id": provider_id,
                         "pagerduty_incident_id": original_incident_id,
                         "incident_key": incident_key,
+                        "incident_key_source": incident_key_source,
                         "event_type": event_type,
                         "keep_incident_id": str(keep_incident_id),
                         "detected_by": keep_origin_detected_by,
@@ -2520,6 +2584,7 @@ class PagerdutyProvider(
                         "provider_id": provider_id,
                         "pagerduty_incident_id": original_incident_id,
                         "incident_key": incident_key,
+                        "incident_key_source": incident_key_source,
                         "event_type": event_type,
                         "keep_incident_id": str(keep_incident_id),
                         "detected_by": keep_origin_detected_by,
@@ -2539,6 +2604,7 @@ class PagerdutyProvider(
                         "provider_id": provider_id,
                         "pagerduty_incident_id": original_incident_id,
                         "incident_key": incident_key,
+                        "incident_key_source": incident_key_source,
                         "event_type": event_type,
                         "keep_incident_id": str(keep_incident_id),
                         "detected_by": keep_origin_detected_by,
@@ -2559,12 +2625,13 @@ class PagerdutyProvider(
                 extra={
                     "tenant_id": tenant_id,
                     "provider_id": provider_id,
-                    "pagerduty_incident_id": original_incident_id,
-                    "incident_key": incident_key,
-                    "event_type": event_type,
-                    "keep_incident_id": str(keep_incident_id),
-                    "detected_by": keep_origin_detected_by,
-                    "keep_status": keep_status_value,
+                        "pagerduty_incident_id": original_incident_id,
+                        "incident_key": incident_key,
+                        "incident_key_source": incident_key_source,
+                        "event_type": event_type,
+                        "keep_incident_id": str(keep_incident_id),
+                        "detected_by": keep_origin_detected_by,
+                        "keep_status": keep_status_value,
                     "pagerduty_status": pagerduty_status.value,
                 },
             )
