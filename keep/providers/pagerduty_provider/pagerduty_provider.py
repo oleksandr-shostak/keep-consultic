@@ -642,6 +642,9 @@ class PagerdutyProvider(
                 continue
 
             alert_name = str(alert_dict.get("name", "") or f"Keep alert {fingerprint}")
+            alert_message = alert_dict.get("message")
+            alert_description = alert_dict.get("description")
+            alert_description_format = alert_dict.get("description_format")
             keep_alert_url = (
                 self._build_keep_alert_url(resolved_keep_ui_url, fingerprint)
                 if resolved_keep_ui_url
@@ -691,6 +694,10 @@ class PagerdutyProvider(
                 "keep_alert_fingerprint": fingerprint,
                 "keep_alert_url": keep_alert_url,
                 "keep_alert_id": alert_dict.get("event_id") or alert_dict.get("id"),
+                "keep_alert_name": alert_name,
+                "keep_alert_message": alert_message,
+                "keep_alert_description": alert_description,
+                "keep_alert_description_format": alert_description_format,
                 "keep_alert_status": status_value,
                 "keep_alert_severity": keep_severity_value,
             }
