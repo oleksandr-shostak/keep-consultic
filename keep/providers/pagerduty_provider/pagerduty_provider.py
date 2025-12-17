@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import typing
 import urllib.parse
@@ -2363,16 +2364,17 @@ class PagerdutyProvider(
             )
             return []
 
+        tenant_id = (
+            getattr(getattr(provider_instance, "context_manager", None), "tenant_id", None)
+            if provider_instance
+            else None
+        )
+        provider_id = getattr(provider_instance, "provider_id", None) if provider_instance else None
+
         incident_key = event.get("incident_key")
         if isinstance(incident_key, str) and incident_key.startswith(
             KEEP_PD_ALERT_INCIDENT_KEY_PREFIX
         ):
-            tenant_id = (
-                getattr(getattr(provider_instance, "context_manager", None), "tenant_id", None)
-                if provider_instance
-                else None
-            )
-            provider_id = getattr(provider_instance, "provider_id", None) if provider_instance else None
             logger.info(
                 "Skipping Keep-originated PagerDuty alert incident",
                 extra={
@@ -2385,68 +2387,58 @@ class PagerdutyProvider(
             )
             return []
 
+        def _extract_keep_incident_id_from_details(raw_details: typing.Any) -> uuid.UUID | None:
+            if not raw_details:
+                return None
+            details = raw_details if isinstance(raw_details, str) else str(raw_details)
+            match = re.search(
+                r"[0-9a-fA-F]{8}-"
+                r"[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{12}",
+                details,
+            )
+            if not match:
+                return None
+            try:
+                return uuid.UUID(match.group(0))
+            except Exception:
+                return None
+
+        keep_incident_id: uuid.UUID | None = None
+        keep_origin_detected_by: str | None = None
+
         if isinstance(incident_key, str):
-            keep_incident_id: uuid.UUID | None = None
             try:
                 keep_incident_id = uuid.UUID(incident_key)
+                keep_origin_detected_by = "incident_key_uuid"
             except (ValueError, AttributeError, TypeError):
                 keep_incident_id = None
 
+        if keep_incident_id is None:
+            body = event.get("body")
+            details = None
+            if isinstance(body, dict):
+                details = body.get("details") or body.get("detail") or body.get("summary")
+            keep_incident_id = _extract_keep_incident_id_from_details(details)
             if keep_incident_id is not None:
-                tenant_id = (
-                    getattr(getattr(provider_instance, "context_manager", None), "tenant_id", None)
-                    if provider_instance
-                    else None
-                )
-                provider_id = getattr(provider_instance, "provider_id", None) if provider_instance else None
+                keep_origin_detected_by = "body_details_uuid"
 
-                keep_incident_exists = False
-                if tenant_id:
-                    try:
-                        from keep.api.core.db import get_incident_by_id
-
-                        keep_incident_exists = (
-                            get_incident_by_id(tenant_id=tenant_id, incident_id=keep_incident_id)
-                            is not None
-                        )
-                    except Exception:
-                        logger.exception(
-                            "PagerDuty incident webhook: failed checking Keep incident existence",
-                            extra={
-                                "tenant_id": tenant_id,
-                                "provider_id": provider_id,
-                                "pagerduty_incident_id": original_incident_id,
-                                "incident_key": incident_key,
-                                "event_type": event_type,
-                                "keep_incident_id": str(keep_incident_id),
-                            },
-                        )
-
-                if keep_incident_exists:
-                    logger.info(
-                        "Skipping Keep-originated PagerDuty incident webhook (prevents sync loops)",
-                        extra={
-                            "tenant_id": tenant_id,
-                            "provider_id": provider_id,
-                            "pagerduty_incident_id": original_incident_id,
-                            "incident_key": incident_key,
-                            "event_type": event_type,
-                            "keep_incident_id": str(keep_incident_id),
-                        },
-                    )
-                    return []
-                else:
-                    logger.info(
-                        "PagerDuty incident webhook has UUID incident_key but no matching Keep incident found; ingesting as external incident",
-                        extra={
-                            "tenant_id": tenant_id,
-                            "provider_id": provider_id,
-                            "pagerduty_incident_id": original_incident_id,
-                            "incident_key": incident_key,
-                            "event_type": event_type,
-                            "keep_incident_id": str(keep_incident_id),
-                        },
-                    )
+        if keep_incident_id is not None:
+            logger.info(
+                "Skipping Keep-originated PagerDuty incident webhook (prevents sync loops)",
+                extra={
+                    "tenant_id": tenant_id,
+                    "provider_id": provider_id,
+                    "pagerduty_incident_id": original_incident_id,
+                    "incident_key": incident_key,
+                    "event_type": event_type,
+                    "keep_incident_id": str(keep_incident_id),
+                    "detected_by": keep_origin_detected_by,
+                },
+            )
+            return []
 
         incident_id = PagerdutyProvider._get_incident_id(original_incident_id)
 
