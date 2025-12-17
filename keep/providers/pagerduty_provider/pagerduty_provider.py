@@ -2288,39 +2288,59 @@ class PagerdutyProvider(
                 return parsed
             return None
 
-        def _extract_incident_payload(raw: dict) -> tuple[dict | None, str | None]:
+        def _extract_incident_payload(
+            raw: dict,
+        ) -> tuple[dict | None, str | None, str | None]:
             """
             Supports PagerDuty webhooks v3 (messages[]) and legacy formats.
 
             Returns:
-                (incident_payload, message_created_on)
+                (incident_payload, message_created_on, event_type)
             """
             if not isinstance(raw, dict):
-                return None, None
+                return None, None, None
 
             if "incident" in raw and isinstance(raw["incident"], dict):
-                return raw["incident"], raw.get("created_on") or raw.get("created_at")
+                return (
+                    raw["incident"],
+                    raw.get("created_on") or raw.get("created_at"),
+                    raw.get("event_type") or raw.get("type"),
+                )
 
             if "event" in raw and isinstance(raw["event"], dict):
+                event_type = raw["event"].get("event_type") or raw["event"].get("type")
                 data = raw["event"].get("data")
                 if isinstance(data, dict):
                     # Some payloads wrap incident under data.incident
                     if "incident" in data and isinstance(data["incident"], dict):
-                        return data["incident"], raw.get("created_on") or data.get(
-                            "created_at"
+                        return (
+                            data["incident"],
+                            raw.get("created_on") or data.get("created_at"),
+                            event_type,
                         )
-                    return data, raw.get("created_on") or data.get("created_at")
+                    return data, raw.get("created_on") or data.get("created_at"), event_type
 
-            return raw, raw.get("created_on") or raw.get("created_at")
+            return raw, raw.get("created_on") or raw.get("created_at"), raw.get(
+                "event_type"
+            ) or raw.get("type")
 
         if isinstance(event, dict) and isinstance(event.get("messages"), list):
             incidents: list[IncidentDto] = []
             for message in event.get("messages", []):
-                incident_payload, message_created_on = _extract_incident_payload(message)
+                incident_payload, message_created_on, _event_type = _extract_incident_payload(
+                    message
+                )
                 if not incident_payload:
                     continue
                 formatted = PagerdutyProvider._format_incident(
-                    {"event": {"data": incident_payload}, "created_on": message_created_on}
+                    {
+                        "event": {
+                            "data": incident_payload,
+                            "event_type": _event_type,
+                        },
+                        "created_on": message_created_on,
+                    },
+                    provider_instance,
                 )
                 if isinstance(formatted, list):
                     incidents.extend(formatted)
@@ -2328,7 +2348,7 @@ class PagerdutyProvider(
                     incidents.append(formatted)
             return incidents
 
-        incident_payload, message_created_on = _extract_incident_payload(event)
+        incident_payload, message_created_on, event_type = _extract_incident_payload(event)
         event = incident_payload or {}
 
         # This will be the same for the same incident
@@ -2347,14 +2367,86 @@ class PagerdutyProvider(
         if isinstance(incident_key, str) and incident_key.startswith(
             KEEP_PD_ALERT_INCIDENT_KEY_PREFIX
         ):
+            tenant_id = (
+                getattr(getattr(provider_instance, "context_manager", None), "tenant_id", None)
+                if provider_instance
+                else None
+            )
+            provider_id = getattr(provider_instance, "provider_id", None) if provider_instance else None
             logger.info(
                 "Skipping Keep-originated PagerDuty alert incident",
                 extra={
+                    "tenant_id": tenant_id,
+                    "provider_id": provider_id,
                     "pagerduty_incident_id": original_incident_id,
                     "incident_key": incident_key,
+                    "event_type": event_type,
                 },
             )
             return []
+
+        if isinstance(incident_key, str):
+            keep_incident_id: uuid.UUID | None = None
+            try:
+                keep_incident_id = uuid.UUID(incident_key)
+            except (ValueError, AttributeError, TypeError):
+                keep_incident_id = None
+
+            if keep_incident_id is not None:
+                tenant_id = (
+                    getattr(getattr(provider_instance, "context_manager", None), "tenant_id", None)
+                    if provider_instance
+                    else None
+                )
+                provider_id = getattr(provider_instance, "provider_id", None) if provider_instance else None
+
+                keep_incident_exists = False
+                if tenant_id:
+                    try:
+                        from keep.api.core.db import get_incident_by_id
+
+                        keep_incident_exists = (
+                            get_incident_by_id(tenant_id=tenant_id, incident_id=keep_incident_id)
+                            is not None
+                        )
+                    except Exception:
+                        logger.exception(
+                            "PagerDuty incident webhook: failed checking Keep incident existence",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "provider_id": provider_id,
+                                "pagerduty_incident_id": original_incident_id,
+                                "incident_key": incident_key,
+                                "event_type": event_type,
+                                "keep_incident_id": str(keep_incident_id),
+                            },
+                        )
+
+                if keep_incident_exists:
+                    logger.info(
+                        "Skipping Keep-originated PagerDuty incident webhook (prevents sync loops)",
+                        extra={
+                            "tenant_id": tenant_id,
+                            "provider_id": provider_id,
+                            "pagerduty_incident_id": original_incident_id,
+                            "incident_key": incident_key,
+                            "event_type": event_type,
+                            "keep_incident_id": str(keep_incident_id),
+                        },
+                    )
+                    return []
+                else:
+                    logger.info(
+                        "PagerDuty incident webhook has UUID incident_key but no matching Keep incident found; ingesting as external incident",
+                        extra={
+                            "tenant_id": tenant_id,
+                            "provider_id": provider_id,
+                            "pagerduty_incident_id": original_incident_id,
+                            "incident_key": incident_key,
+                            "event_type": event_type,
+                            "keep_incident_id": str(keep_incident_id),
+                        },
+                    )
 
         incident_id = PagerdutyProvider._get_incident_id(original_incident_id)
 
