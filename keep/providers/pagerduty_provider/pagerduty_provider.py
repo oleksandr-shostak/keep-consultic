@@ -1795,10 +1795,52 @@ class PagerdutyProvider(
             )
             return response
         except Exception as e:
+            response_json: dict | None = None
+            try:
+                response_json = r.json()
+            except Exception:
+                response_json = None
+
+            def _has_error(substring: str) -> bool:
+                if not response_json or not isinstance(response_json, dict):
+                    return False
+                needle = substring.lower()
+                for container_key in ("incident", "error"):
+                    container = response_json.get(container_key) or {}
+                    if isinstance(container, dict):
+                        errors = container.get("errors") or []
+                        if isinstance(errors, list) and any(
+                            needle in str(err).lower() for err in errors
+                        ):
+                            return True
+                return False
+
+            already_resolved = _has_error("Incident Already Resolved")
+            already_acknowledged = _has_error("Incident Already Acknowledged")
+            if status and (already_resolved or already_acknowledged):
+                self.logger.info(
+                    "PagerDuty incident update: no-op (already in desired state)",
+                    extra={
+                        "tenant_id": self.context_manager.tenant_id,
+                        "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                        "workflow_execution_id": getattr(
+                            self.context_manager, "workflow_execution_id", None
+                        ),
+                        "incident_id": incident_id,
+                        "requested_status": status,
+                        "already_resolved": already_resolved,
+                        "already_acknowledged": already_acknowledged,
+                    },
+                )
+                if isinstance(response_json, dict):
+                    return response_json
+                return {"incident": {"id": incident_id}}
+
             self.logger.error(
                 "Failed to update incident",
                 extra={
                     "response_text": r.text,
+                    "response_json": response_json,
                     "incident_id": incident_id,
                     "tenant_id": self.context_manager.tenant_id,
                     "workflow_id": getattr(self.context_manager, "workflow_id", None),
