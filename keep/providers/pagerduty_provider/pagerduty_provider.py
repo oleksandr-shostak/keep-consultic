@@ -2475,8 +2475,87 @@ class PagerdutyProvider(
                 keep_origin_detected_by = "body_details_uuid"
 
         if keep_incident_id is not None:
+            if not tenant_id:
+                logger.warning(
+                    "PagerDuty incident webhook: Keep incident id detected but tenant_id is missing; skipping",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "provider_id": provider_id,
+                        "pagerduty_incident_id": original_incident_id,
+                        "incident_key": incident_key,
+                        "event_type": event_type,
+                        "keep_incident_id": str(keep_incident_id),
+                        "detected_by": keep_origin_detected_by,
+                    },
+                )
+                return []
+
+            try:
+                from keep.api.core.db import get_incident_by_id
+
+                keep_incident = get_incident_by_id(
+                    tenant_id=tenant_id,
+                    incident_id=keep_incident_id,
+                )
+            except Exception:
+                logger.exception(
+                    "PagerDuty incident webhook: failed loading Keep incident",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "provider_id": provider_id,
+                        "pagerduty_incident_id": original_incident_id,
+                        "incident_key": incident_key,
+                        "event_type": event_type,
+                        "keep_incident_id": str(keep_incident_id),
+                        "detected_by": keep_origin_detected_by,
+                    },
+                )
+                return []
+
+            if not keep_incident:
+                logger.info(
+                    "PagerDuty incident webhook: Keep incident not found; ignoring event",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "provider_id": provider_id,
+                        "pagerduty_incident_id": original_incident_id,
+                        "incident_key": incident_key,
+                        "event_type": event_type,
+                        "keep_incident_id": str(keep_incident_id),
+                        "detected_by": keep_origin_detected_by,
+                    },
+                )
+                return []
+
+            pagerduty_status = PagerdutyProvider.INCIDENT_STATUS_MAP.get(
+                event.get("status", "firing"), IncidentStatus.FIRING
+            )
+            keep_status_value = str(getattr(keep_incident, "status", "") or "")
+            if keep_status_value == pagerduty_status.value:
+                logger.info(
+                    "PagerDuty incident webhook: Keep incident status already matches; skipping",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "provider_id": provider_id,
+                        "pagerduty_incident_id": original_incident_id,
+                        "incident_key": incident_key,
+                        "event_type": event_type,
+                        "keep_incident_id": str(keep_incident_id),
+                        "detected_by": keep_origin_detected_by,
+                        "keep_status": keep_status_value,
+                        "pagerduty_status": pagerduty_status.value,
+                    },
+                )
+                return []
+
+            keep_incident_dto = IncidentDto.from_db_incident(keep_incident)
+            keep_incident_dto.status = pagerduty_status
+            keep_incident_dto._alerts = []
+            if pagerduty_status == IncidentStatus.RESOLVED:
+                keep_incident_dto.end_time = datetime.datetime.now(tz=datetime.timezone.utc)
+
             logger.info(
-                "Skipping Keep-originated PagerDuty incident webhook (prevents sync loops)",
+                "PagerDuty incident webhook: syncing Keep incident status",
                 extra={
                     "tenant_id": tenant_id,
                     "provider_id": provider_id,
@@ -2485,9 +2564,11 @@ class PagerdutyProvider(
                     "event_type": event_type,
                     "keep_incident_id": str(keep_incident_id),
                     "detected_by": keep_origin_detected_by,
+                    "keep_status": keep_status_value,
+                    "pagerduty_status": pagerduty_status.value,
                 },
             )
-            return []
+            return keep_incident_dto
 
         incident_id = PagerdutyProvider._get_incident_id(original_incident_id)
 
