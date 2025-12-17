@@ -83,6 +83,15 @@ The provider uses either the events API or the incidents API to create an alert 
 
 When using the incidents API, you can pass `incident_key` as an idempotency (dedup) key to look up an existing PagerDuty incident and avoid creating duplicates.
 
+### Sync Keep alerts into PagerDuty incident notes
+
+If you want PagerDuty users to see the list of Keep alerts linked to a Keep incident, you can sync them as PagerDuty incident notes:
+
+- Set `sync_incident_alert_notes: true` in a PagerDuty workflow action (requires `api_key` or OAuth).
+- Keep creates/updates **one note per active Keep alert** and deletes notes for resolved/dismissed/unlinked alerts.
+- Notes created by Keep include a stable marker line `KEEP_ALERT_FINGERPRINT=<fingerprint>` for idempotent syncing and cleanup.
+- To include clickable links back to Keep in the note content, set `KEEP_URL` (or `KEEP_UI_URL`) in the Keep backend environment.
+
 An expired trial while using the free version of PagerDuty may result in the "pagerduty scopes are invalid" error at Keep.
 
 ## Webhook Integration Modifications

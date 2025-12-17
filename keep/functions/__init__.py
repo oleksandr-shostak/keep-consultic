@@ -2,6 +2,7 @@ import copy
 import datetime
 import json
 import logging
+import os
 import re
 import urllib.parse
 from datetime import timedelta
@@ -407,6 +408,88 @@ def replace(string: str, old: str, new: str) -> str:
 
 def encode(string) -> str:
     return urllib.parse.quote(string)
+
+def keep_ui_url(override: str | None = None, **kwargs) -> str:
+    """
+    Returns the Keep UI base URL (no trailing slash).
+
+    Resolution order:
+    1) explicit override param
+    2) env KEEP_URL or KEEP_UI_URL
+    3) best-effort inference from KEEP_API_URL (env or context_manager.api_url)
+
+    Returns empty string if it cannot be determined.
+    """
+    if override:
+        return str(override).rstrip("/")
+
+    env_url = os.environ.get("KEEP_URL") or os.environ.get("KEEP_UI_URL")
+    if env_url:
+        return str(env_url).rstrip("/")
+
+    api_url = os.environ.get("KEEP_API_URL")
+    if not api_url:
+        context_manager = kwargs.get("context_manager")
+        api_url = getattr(context_manager, "api_url", None) if context_manager else None
+
+    if not api_url:
+        return ""
+
+    try:
+        parsed = urllib.parse.urlparse(str(api_url))
+        if not parsed.scheme or not parsed.hostname:
+            return ""
+
+        host = parsed.hostname
+        if host.startswith("api."):
+            host = host[len("api.") :]
+
+        ui_port = 3000 if parsed.port in {8080, 8000} else None
+        netloc = host if ui_port is None else f"{host}:{ui_port}"
+        return f"{parsed.scheme}://{netloc}"
+    except Exception:
+        return ""
+
+
+def incident_url(incident_or_id, override_base_url: str | None = None, **kwargs) -> str:
+    """
+    Build a Keep UI link to an incident page.
+
+    Accepts an IncidentDto, dict, UUID, or string id.
+    """
+    incident_id = ""
+    if isinstance(incident_or_id, dict):
+        incident_id = str(incident_or_id.get("id", "") or "")
+    elif hasattr(incident_or_id, "id"):
+        incident_id = str(getattr(incident_or_id, "id", "") or "")
+    else:
+        incident_id = str(incident_or_id or "")
+
+    base = keep_ui_url(override_base_url, **kwargs)
+    if base:
+        return f"{base}/incidents/{incident_id}"
+    return f"/incidents/{incident_id}"
+
+
+def alert_url(alert_or_fingerprint, override_base_url: str | None = None, **kwargs) -> str:
+    """
+    Build a Keep UI link to open an alert from the feed preset.
+
+    Accepts an AlertDto, dict, or fingerprint string.
+    """
+    fingerprint = ""
+    if isinstance(alert_or_fingerprint, dict):
+        fingerprint = str(alert_or_fingerprint.get("fingerprint", "") or "")
+    elif hasattr(alert_or_fingerprint, "fingerprint"):
+        fingerprint = str(getattr(alert_or_fingerprint, "fingerprint", "") or "")
+    else:
+        fingerprint = str(alert_or_fingerprint or "")
+
+    base = keep_ui_url(override_base_url, **kwargs)
+    encoded = urllib.parse.quote(fingerprint, safe="")
+    if base:
+        return f"{base}/alerts/feed?alertPayloadFingerprint={encoded}"
+    return f"/alerts/feed?alertPayloadFingerprint={encoded}"
 
 
 def dict_to_key_value_list(d: dict) -> list:

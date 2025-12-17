@@ -4,8 +4,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import typing
+import urllib.parse
 import uuid
 
 import pydantic
@@ -30,6 +32,10 @@ from keep.providers.providers_factory import ProvidersFactory
 # Read this: https://community.pagerduty.com/forum/t/create-incident-using-python/3596/3
 
 logger = logging.getLogger(__name__)
+
+KEEP_ALERT_NOTE_FINGERPRINT_RE = re.compile(
+    r"^KEEP_ALERT_FINGERPRINT=(?P<fingerprint>\\S+)$", re.MULTILINE
+)
 
 
 @pydantic.dataclasses.dataclass
@@ -298,6 +304,428 @@ class PagerdutyProvider(
                 "Content-Type": "application/json",
             }
         return {}
+
+    def _get_incident_notes(self, incident_id: str) -> list[dict]:
+        url = f"{self.BASE_API_URL}/incidents/{incident_id}/notes"
+        response = requests.get(url, headers=self.__get_headers())
+        response.raise_for_status()
+        return response.json().get("notes", []) or []
+
+    def _create_incident_note(
+        self,
+        incident_id: str,
+        requester: str,
+        content: str,
+    ) -> dict:
+        if not requester:
+            raise ValueError("requester is required to create PagerDuty incident notes")
+        url = f"{self.BASE_API_URL}/incidents/{incident_id}/notes"
+        payload = {"note": {"content": content}}
+        response = requests.post(
+            url,
+            headers=self.__get_headers(From=requester),
+            json=payload,
+        )
+        try:
+            response.raise_for_status()
+        except Exception as e:
+            raise Exception(response.text) from e
+        return response.json()
+
+    def _update_incident_note(
+        self,
+        incident_id: str,
+        note_id: str,
+        requester: str,
+        content: str,
+    ) -> dict:
+        if not requester:
+            raise ValueError("requester is required to update PagerDuty incident notes")
+        url = f"{self.BASE_API_URL}/incidents/{incident_id}/notes/{note_id}"
+        payload = {"note": {"content": content}}
+        response = requests.put(
+            url,
+            headers=self.__get_headers(From=requester),
+            json=payload,
+        )
+        try:
+            response.raise_for_status()
+        except Exception as e:
+            raise Exception(response.text) from e
+        return response.json()
+
+    def _delete_incident_note(
+        self,
+        incident_id: str,
+        note_id: str,
+        requester: str | None = None,
+    ) -> None:
+        url = f"{self.BASE_API_URL}/incidents/{incident_id}/notes/{note_id}"
+        headers = self.__get_headers(From=requester) if requester else self.__get_headers()
+        response = requests.delete(url, headers=headers)
+        try:
+            response.raise_for_status()
+        except Exception as e:
+            raise Exception(response.text) from e
+
+    @staticmethod
+    def _is_truthy(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+        return bool(value)
+
+    def _get_keep_ui_url(self, override: str | None = None) -> str | None:
+        if override:
+            return override.rstrip("/")
+
+        env_url = os.environ.get("KEEP_URL") or os.environ.get("KEEP_UI_URL")
+        if env_url:
+            return env_url.rstrip("/")
+
+        try:
+            api_url = self.context_manager.api_url
+            parsed = urllib.parse.urlparse(api_url)
+            if not parsed.scheme or not parsed.hostname:
+                return None
+
+            host = parsed.hostname
+            if host.startswith("api."):
+                host = host[len("api.") :]
+
+            # Best-effort: default local UI port if backend is on common local ports.
+            ui_port: int | None = None
+            if parsed.port in {8080, 8000}:
+                ui_port = 3000
+
+            netloc = host if ui_port is None else f"{host}:{ui_port}"
+            return f"{parsed.scheme}://{netloc}"
+        except Exception:
+            return None
+
+    def _build_keep_incident_url(self, keep_ui_url: str, keep_incident_id: str) -> str:
+        return f"{keep_ui_url}/incidents/{keep_incident_id}"
+
+    def _build_keep_alert_url(self, keep_ui_url: str, alert_fingerprint: str) -> str:
+        fingerprint = urllib.parse.quote(str(alert_fingerprint), safe="")
+        return f"{keep_ui_url}/alerts/feed?alertPayloadFingerprint={fingerprint}"
+
+    def _extract_keep_alert_fingerprint_from_note(self, note: dict) -> str | None:
+        content = (note or {}).get("content") or ""
+        match = KEEP_ALERT_NOTE_FINGERPRINT_RE.search(content)
+        if not match:
+            return None
+        return match.group("fingerprint")
+
+    def _normalize_alert_dict(self, alert: object) -> dict:
+        if isinstance(alert, dict):
+            return alert
+        if hasattr(alert, "dict") and callable(getattr(alert, "dict")):
+            try:
+                return alert.dict()
+            except Exception:
+                pass
+        if hasattr(alert, "__dict__"):
+            try:
+                return dict(alert.__dict__)
+            except Exception:
+                pass
+        return {}
+
+    def _alert_is_active(self, alert_dict: dict) -> bool:
+        status = alert_dict.get("status")
+        if isinstance(status, AlertStatus):
+            status_value = status.value
+        else:
+            status_value = str(status).lower() if status is not None else ""
+
+        is_resolved = status_value == AlertStatus.RESOLVED.value
+        dismissed = alert_dict.get("dismissed")
+        deleted = alert_dict.get("deleted")
+
+        return not (is_resolved or self._is_truthy(dismissed) or self._is_truthy(deleted))
+
+    def _build_keep_alert_note_content(
+        self,
+        keep_incident_id: str,
+        alert_dict: dict,
+        keep_ui_url: str | None,
+    ) -> str:
+        fingerprint = str(alert_dict.get("fingerprint", "") or "")
+        name = str(alert_dict.get("name", "") or "")
+        keep_alert_id = str(alert_dict.get("event_id") or alert_dict.get("id") or "")
+
+        lines = [
+            "Keep Alert",
+            f"- Name: {name}" if name else "- Name: (missing)",
+            f"- Fingerprint: {fingerprint}" if fingerprint else "- Fingerprint: (missing)",
+        ]
+
+        if keep_alert_id:
+            lines.append(f"- Keep Alert ID: {keep_alert_id}")
+
+        if keep_ui_url and fingerprint:
+            lines.append(f"- Keep Alert Link: {self._build_keep_alert_url(keep_ui_url, fingerprint)}")
+
+        if keep_ui_url and keep_incident_id:
+            lines.append(f"- Keep Incident Link: {self._build_keep_incident_url(keep_ui_url, keep_incident_id)}")
+        else:
+            lines.append(f"- Keep Incident ID: {keep_incident_id}")
+
+        # Marker line for idempotent sync (must remain stable).
+        if fingerprint:
+            lines.append(f"KEEP_ALERT_FINGERPRINT={fingerprint}")
+        return "\n".join(lines).strip()
+
+    def _sync_keep_incident_alert_notes(
+        self,
+        pagerduty_incident_id: str,
+        requester: str,
+        keep_ui_url: str | None = None,
+        update_existing: bool = True,
+    ) -> dict:
+        if not pagerduty_incident_id:
+            raise ValueError("pagerduty incident_id is required for notes sync")
+
+        incident_context = self.context_manager.incident_context
+        if not incident_context:
+            raise Exception(
+                "PagerDuty alert notes sync requires Keep incident context (workflow trigger type: incident)"
+            )
+
+        keep_incident_id = ""
+        if isinstance(incident_context, dict):
+            keep_incident_id = str(incident_context.get("id", "") or "")
+            alerts = incident_context.get("alerts") or []
+        else:
+            keep_incident_id = str(getattr(incident_context, "id", "") or "")
+            alerts = getattr(incident_context, "alerts", []) or []
+
+        resolved_keep_ui_url = self._get_keep_ui_url(keep_ui_url)
+        if not resolved_keep_ui_url:
+            self.logger.warning(
+                "PagerDuty notes sync: KEEP_URL/KEEP_UI_URL not set; falling back to IDs only (no Keep links)",
+                extra={
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                    "keep_incident_id": keep_incident_id,
+                    "pagerduty_incident_id": pagerduty_incident_id,
+                },
+            )
+
+        desired_note_by_fingerprint: dict[str, str] = {}
+        skipped_alerts = 0
+        for alert in alerts:
+            alert_dict = self._normalize_alert_dict(alert)
+            fingerprint = str(alert_dict.get("fingerprint", "") or "")
+            if not fingerprint:
+                skipped_alerts += 1
+                continue
+            if not self._alert_is_active(alert_dict):
+                continue
+            desired_note_by_fingerprint[fingerprint] = self._build_keep_alert_note_content(
+                keep_incident_id=keep_incident_id,
+                alert_dict=alert_dict,
+                keep_ui_url=resolved_keep_ui_url,
+            )
+
+        self.logger.info(
+            "PagerDuty notes sync: start",
+            extra={
+                "tenant_id": self.context_manager.tenant_id,
+                "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                "workflow_execution_id": getattr(
+                    self.context_manager, "workflow_execution_id", None
+                ),
+                "keep_incident_id": keep_incident_id,
+                "pagerduty_incident_id": pagerduty_incident_id,
+                "alerts_total": len(alerts),
+                "alerts_skipped_missing_fingerprint": skipped_alerts,
+                "alerts_active_desired": len(desired_note_by_fingerprint),
+                "update_existing": update_existing,
+                "has_keep_ui_url": bool(resolved_keep_ui_url),
+            },
+        )
+
+        notes = self._get_incident_notes(pagerduty_incident_id)
+        managed_notes_by_fingerprint: dict[str, list[dict]] = {}
+        for note in notes:
+            fingerprint = self._extract_keep_alert_fingerprint_from_note(note)
+            if not fingerprint:
+                continue
+            managed_notes_by_fingerprint.setdefault(fingerprint, []).append(note)
+
+        existing_note_by_fingerprint: dict[str, dict] = {}
+        duplicate_notes_to_delete: list[tuple[str, dict]] = []
+        for fingerprint, note_list in managed_notes_by_fingerprint.items():
+            if not note_list:
+                continue
+            note_list_sorted = sorted(
+                note_list,
+                key=lambda n: (
+                    n.get("updated_at") or n.get("created_at") or "",
+                    n.get("id") or "",
+                ),
+            )
+            keep_note = note_list_sorted[-1]
+            existing_note_by_fingerprint[fingerprint] = keep_note
+            for duplicate_note in note_list_sorted[:-1]:
+                duplicate_notes_to_delete.append((fingerprint, duplicate_note))
+
+        desired_fingerprints = set(desired_note_by_fingerprint.keys())
+        existing_fingerprints = set(existing_note_by_fingerprint.keys())
+
+        to_create = sorted(desired_fingerprints - existing_fingerprints)
+        to_consider_update = sorted(desired_fingerprints & existing_fingerprints)
+        to_delete = sorted(existing_fingerprints - desired_fingerprints)
+
+        created: list[dict] = []
+        updated: list[dict] = []
+        deleted: list[dict] = []
+
+        for fingerprint in to_create:
+            content = desired_note_by_fingerprint[fingerprint]
+            response = self._create_incident_note(
+                incident_id=pagerduty_incident_id,
+                requester=requester,
+                content=content,
+            )
+            note = (response or {}).get("note") or response
+            created.append(
+                {
+                    "fingerprint": fingerprint,
+                    "note_id": (note or {}).get("id"),
+                }
+            )
+            self.logger.info(
+                "PagerDuty notes sync: created note",
+                extra={
+                    "tenant_id": self.context_manager.tenant_id,
+                    "keep_incident_id": keep_incident_id,
+                    "pagerduty_incident_id": pagerduty_incident_id,
+                    "alert_fingerprint": fingerprint,
+                    "pagerduty_note_id": (note or {}).get("id"),
+                },
+            )
+
+        if update_existing:
+            for fingerprint in to_consider_update:
+                desired_content = desired_note_by_fingerprint[fingerprint]
+                existing_note = existing_note_by_fingerprint.get(fingerprint) or {}
+                existing_content = existing_note.get("content") or ""
+                if existing_content.strip() == desired_content.strip():
+                    continue
+                note_id = existing_note.get("id")
+                if not note_id:
+                    continue
+                response = self._update_incident_note(
+                    incident_id=pagerduty_incident_id,
+                    note_id=note_id,
+                    requester=requester,
+                    content=desired_content,
+                )
+                note = (response or {}).get("note") or response
+                updated.append(
+                    {
+                        "fingerprint": fingerprint,
+                        "note_id": (note or {}).get("id") or note_id,
+                    }
+                )
+                self.logger.info(
+                    "PagerDuty notes sync: updated note",
+                    extra={
+                        "tenant_id": self.context_manager.tenant_id,
+                        "keep_incident_id": keep_incident_id,
+                        "pagerduty_incident_id": pagerduty_incident_id,
+                        "alert_fingerprint": fingerprint,
+                        "pagerduty_note_id": (note or {}).get("id") or note_id,
+                    },
+                )
+
+        for fingerprint in to_delete:
+            note = existing_note_by_fingerprint.get(fingerprint) or {}
+            note_id = note.get("id")
+            if not note_id:
+                continue
+            self._delete_incident_note(
+                incident_id=pagerduty_incident_id,
+                note_id=note_id,
+                requester=requester,
+            )
+            deleted.append({"fingerprint": fingerprint, "note_id": note_id})
+            self.logger.info(
+                "PagerDuty notes sync: deleted note",
+                extra={
+                    "tenant_id": self.context_manager.tenant_id,
+                    "keep_incident_id": keep_incident_id,
+                    "pagerduty_incident_id": pagerduty_incident_id,
+                    "alert_fingerprint": fingerprint,
+                    "pagerduty_note_id": note_id,
+                },
+            )
+
+        for fingerprint, duplicate_note in duplicate_notes_to_delete:
+            note_id = (duplicate_note or {}).get("id")
+            if not note_id:
+                continue
+            self._delete_incident_note(
+                incident_id=pagerduty_incident_id,
+                note_id=note_id,
+                requester=requester,
+            )
+            deleted.append({"fingerprint": fingerprint, "note_id": note_id, "duplicate": True})
+            self.logger.warning(
+                "PagerDuty notes sync: deleted duplicate note",
+                extra={
+                    "tenant_id": self.context_manager.tenant_id,
+                    "keep_incident_id": keep_incident_id,
+                    "pagerduty_incident_id": pagerduty_incident_id,
+                    "alert_fingerprint": fingerprint,
+                    "pagerduty_note_id": note_id,
+                },
+            )
+
+        result = {
+            "action": "sync_incident_alert_notes",
+            "keep_incident_id": keep_incident_id,
+            "pagerduty_incident_id": pagerduty_incident_id,
+            "alerts_total": len(alerts),
+            "alerts_active_desired": len(desired_note_by_fingerprint),
+            "pagerduty_notes_total": len(notes),
+            "pagerduty_notes_managed": sum(len(v) for v in managed_notes_by_fingerprint.values()),
+            "created": created,
+            "updated": updated,
+            "deleted": deleted,
+        }
+
+        self.logger.info(
+            "PagerDuty notes sync: done",
+            extra={
+                "tenant_id": self.context_manager.tenant_id,
+                "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                "workflow_execution_id": getattr(
+                    self.context_manager, "workflow_execution_id", None
+                ),
+                "keep_incident_id": keep_incident_id,
+                "pagerduty_incident_id": pagerduty_incident_id,
+                "created": len(created),
+                "updated": len(updated),
+                "deleted": len(deleted),
+                "desired": len(desired_note_by_fingerprint),
+                "notes_total": len(notes),
+                "notes_managed": sum(len(v) for v in managed_notes_by_fingerprint.values()),
+            },
+        )
+
+        return result
 
     def validate_scopes(self):
         """
@@ -790,6 +1218,36 @@ class PagerdutyProvider(
                 "has_oauth": bool(bool(self.authentication_config.oauth_data)),
             },
         )
+
+        sync_alert_notes = self._is_truthy(
+            kwargs.get("sync_alert_notes")
+            or kwargs.get("sync_keep_alert_notes")
+            or kwargs.get("sync_incident_alert_notes")
+            or kwargs.get("sync_keep_incident_alert_notes")
+        )
+        if sync_alert_notes:
+            if not (self.authentication_config.api_key or self.authentication_config.oauth_data):
+                raise ProviderConfigException(
+                    "PagerDuty notes sync requires api_key or OAuth authentication"
+                )
+            pagerduty_incident_id = (
+                incident_id
+                or kwargs.get("pagerduty_incident_id")
+                or kwargs.get("pd_incident_id")
+            )
+            keep_ui_url = (
+                kwargs.get("keep_ui_url")
+                or kwargs.get("keep_url")
+                or kwargs.get("keep_frontend_url")
+            )
+            update_existing = self._is_truthy(kwargs.get("update_existing_notes", True))
+            return self._sync_keep_incident_alert_notes(
+                pagerduty_incident_id=pagerduty_incident_id,
+                requester=requester,
+                keep_ui_url=keep_ui_url,
+                update_existing=update_existing,
+            )
+
         # Prefer the Incidents API when incident-related fields are provided; otherwise fall back to
         # the Events API when a routing_key is available.
         use_incidents_api = bool(
