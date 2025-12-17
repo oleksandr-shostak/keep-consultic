@@ -384,8 +384,13 @@ class PagerdutyProvider(
         digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
         return f"{KEEP_PD_ALERT_INCIDENT_KEY_PREFIX}{digest}"
 
-    def _get_incident_alert_keys(self, incident_id: str) -> set[str]:
-        url = f"{self.BASE_API_URL}/incidents/{incident_id}/alerts"
+    def _get_incident_alert_keys(
+        self,
+        incident_id: str,
+        base_api_url_override: str | None = None,
+    ) -> set[str]:
+        base_api_url = (base_api_url_override or "").rstrip("/") or self.BASE_API_URL
+        url = f"{base_api_url}/incidents/{incident_id}/alerts"
         keys: set[str] = set()
 
         offset = 0
@@ -2514,6 +2519,64 @@ class PagerdutyProvider(
                     "incident_status": event.get("status"),
                 },
             )
+            if provider_instance and hasattr(provider_instance, "_get_incident_alert_keys"):
+                try:
+                    incident_self_url = (
+                        event.get("self")
+                        or (api_incident.get("self") if isinstance(api_incident, dict) else None)
+                    )
+
+                    api_base_url_override = None
+                    if incident_self_url:
+                        try:
+                            parsed = urllib.parse.urlparse(str(incident_self_url))
+                            if (
+                                parsed.scheme == "https"
+                                and parsed.hostname
+                                and parsed.hostname.endswith("pagerduty.com")
+                            ):
+                                api_base_url_override = f"{parsed.scheme}://{parsed.netloc}"
+                        except Exception:
+                            api_base_url_override = None
+
+                    alert_keys = provider_instance._get_incident_alert_keys(
+                        original_incident_id,
+                        base_api_url_override=api_base_url_override,
+                    )
+                    keep_alert_key = next(
+                        (
+                            key
+                            for key in alert_keys
+                            if isinstance(key, str)
+                            and key.startswith(KEEP_PD_ALERT_INCIDENT_KEY_PREFIX)
+                        ),
+                        None,
+                    )
+                    if keep_alert_key:
+                        logger.info(
+                            "Skipping Keep-originated PagerDuty alert incident (identified via alert_key)",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "provider_id": provider_id,
+                                "pagerduty_incident_id": original_incident_id,
+                                "event_type": event_type,
+                                "alert_key": keep_alert_key,
+                                "alerts_total": len(alert_keys),
+                                "incident_self": incident_self_url,
+                                "api_base_url_override": api_base_url_override,
+                            },
+                        )
+                        return []
+                except Exception:
+                    logger.exception(
+                        "PagerDuty incident webhook: failed fetching alert keys for classification",
+                        extra={
+                            "tenant_id": tenant_id,
+                            "provider_id": provider_id,
+                            "pagerduty_incident_id": original_incident_id,
+                            "event_type": event_type,
+                        },
+                    )
         if isinstance(incident_key, str) and incident_key.startswith(
             KEEP_PD_ALERT_INCIDENT_KEY_PREFIX
         ):
