@@ -625,20 +625,89 @@ class PagerdutyProvider(
                 "alerts_total": len(alerts),
                 "alerts_skipped_missing_fingerprint": skipped_missing_fingerprint,
                 "alerts_removed_since_last_sync": len(removed_fingerprints),
+                "previous_synced": len(previous_synced_set),
                 "merge_into_parent": merge_into_parent,
+                "informational_only": True,
                 "has_keep_ui_url": bool(resolved_keep_ui_url),
             },
         )
 
         created_or_updated: list[dict] = []
         merged: list[dict] = []
-        resolved: list[dict] = []
         errors: list[dict] = []
+        newly_synced_fingerprints: set[str] = set()
+        skipped_already_synced = 0
+        skipped_inactive = 0
 
         for alert in alerts:
             alert_dict = self._normalize_alert_dict(alert)
             fingerprint = str(alert_dict.get("fingerprint", "") or "")
             if not fingerprint:
+                continue
+
+            incident_key = self._build_keep_alert_incident_key(keep_incident_id, fingerprint)
+            if fingerprint in previous_synced_set:
+                skipped_already_synced += 1
+                if (
+                    merge_into_parent
+                    and pagerduty_parent_incident_id
+                    and incident_key not in parent_alert_keys
+                ):
+                    try:
+                        source_incident_id = self._get_incident_id_by_incident_key(incident_key)
+                        if not source_incident_id:
+                            self.logger.warning(
+                                "PagerDuty alert sync: could not find source incident id for merge (already-synced alert)",
+                                extra={
+                                    "tenant_id": self.context_manager.tenant_id,
+                                    "keep_incident_id": keep_incident_id,
+                                    "pagerduty_parent_incident_id": pagerduty_parent_incident_id,
+                                    "keep_alert_fingerprint": fingerprint,
+                                    "pagerduty_incident_key": incident_key,
+                                },
+                            )
+                        elif source_incident_id == pagerduty_parent_incident_id:
+                            parent_alert_keys.add(incident_key)
+                        else:
+                            self._merge_incidents(
+                                target_incident_id=pagerduty_parent_incident_id,
+                                source_incident_ids=[source_incident_id],
+                                requester=requester,
+                            )
+                            parent_alert_keys.add(incident_key)
+                            merged.append(
+                                {
+                                    "fingerprint": fingerprint,
+                                    "incident_key": incident_key,
+                                    "source_incident_id": source_incident_id,
+                                }
+                            )
+                            self.logger.info(
+                                "PagerDuty alert sync: merged already-synced incident into parent",
+                                extra={
+                                    "tenant_id": self.context_manager.tenant_id,
+                                    "keep_incident_id": keep_incident_id,
+                                    "pagerduty_parent_incident_id": pagerduty_parent_incident_id,
+                                    "keep_alert_fingerprint": fingerprint,
+                                    "pagerduty_incident_key": incident_key,
+                                    "source_incident_id": source_incident_id,
+                                },
+                            )
+                    except Exception:
+                        self.logger.exception(
+                            "PagerDuty alert sync: failed to merge already-synced alert",
+                            extra={
+                                "tenant_id": self.context_manager.tenant_id,
+                                "keep_incident_id": keep_incident_id,
+                                "pagerduty_parent_incident_id": pagerduty_parent_incident_id,
+                                "keep_alert_fingerprint": fingerprint,
+                                "pagerduty_incident_key": incident_key,
+                            },
+                        )
+                continue
+
+            if not self._alert_is_active(alert_dict):
+                skipped_inactive += 1
                 continue
 
             alert_name = str(alert_dict.get("name", "") or f"Keep alert {fingerprint}")
@@ -657,17 +726,6 @@ class PagerdutyProvider(
             else:
                 status_value = str(status).lower() if status is not None else ""
 
-            dismissed = self._is_truthy(alert_dict.get("dismissed"))
-            deleted = self._is_truthy(alert_dict.get("deleted"))
-            if deleted or dismissed:
-                event_type_value: typing.Literal["trigger", "acknowledge", "resolve"] = "resolve"
-            elif status_value == AlertStatus.RESOLVED.value:
-                event_type_value = "resolve"
-            elif status_value == AlertStatus.ACKNOWLEDGED.value:
-                event_type_value = "acknowledge"
-            else:
-                event_type_value = "trigger"
-
             keep_severity = alert_dict.get("severity")
             if isinstance(keep_severity, AlertSeverity):
                 keep_severity_value = keep_severity.value
@@ -684,8 +742,6 @@ class PagerdutyProvider(
             pd_severity: typing.Literal["critical", "error", "warning", "info"] = severity_map.get(
                 keep_severity_value, "info"
             )
-
-            incident_key = self._build_keep_alert_incident_key(keep_incident_id, fingerprint)
             source = str(alert_dict.get("service") or "keep")
 
             custom_details = {
@@ -714,7 +770,7 @@ class PagerdutyProvider(
                     routing_key=routing_key,
                     dedup=incident_key,
                     severity=pd_severity,
-                    event_type=event_type_value,
+                    event_type="trigger",
                     source=source,
                     custom_details=custom_details,
                     component=alert_dict.get("service"),
@@ -725,7 +781,7 @@ class PagerdutyProvider(
                     {
                         "fingerprint": fingerprint,
                         "incident_key": incident_key,
-                        "event_type": event_type_value,
+                        "event_type": "trigger",
                         "result_status": result.get("status") if isinstance(result, dict) else None,
                     }
                 )
@@ -737,18 +793,16 @@ class PagerdutyProvider(
                         "pagerduty_parent_incident_id": pagerduty_parent_incident_id,
                         "keep_alert_fingerprint": fingerprint,
                         "pagerduty_incident_key": incident_key,
-                        "event_type": event_type_value,
+                        "event_type": "trigger",
                     },
                 )
 
-                if event_type_value == "resolve":
-                    resolved.append({"fingerprint": fingerprint, "incident_key": incident_key})
-                    continue
-
                 if not merge_into_parent or not pagerduty_parent_incident_id:
+                    newly_synced_fingerprints.add(fingerprint)
                     continue
 
                 if incident_key in parent_alert_keys:
+                    newly_synced_fingerprints.add(fingerprint)
                     continue
 
                 source_incident_id = self._get_incident_id_by_incident_key(incident_key)
@@ -767,6 +821,7 @@ class PagerdutyProvider(
 
                 if source_incident_id == pagerduty_parent_incident_id:
                     parent_alert_keys.add(incident_key)
+                    newly_synced_fingerprints.add(fingerprint)
                     continue
 
                 self._merge_incidents(
@@ -782,6 +837,7 @@ class PagerdutyProvider(
                         "source_incident_id": source_incident_id,
                     }
                 )
+                newly_synced_fingerprints.add(fingerprint)
                 self.logger.info(
                     "PagerDuty alert sync: merged incident into parent",
                     extra={
@@ -812,51 +868,6 @@ class PagerdutyProvider(
                     },
                 )
 
-        for fingerprint in removed_fingerprints:
-            incident_key = self._build_keep_alert_incident_key(keep_incident_id, fingerprint)
-            if merge_into_parent and parent_alert_keys and incident_key not in parent_alert_keys:
-                # If it was never merged, skip resolving to avoid noisy PD errors.
-                continue
-            try:
-                self._send_alert(
-                    title=f"Keep alert removed ({fingerprint})",
-                    routing_key=routing_key,
-                    dedup=incident_key,
-                    severity="info",
-                    event_type="resolve",
-                    source="keep",
-                    custom_details={
-                        "keep_incident_id": keep_incident_id,
-                        "keep_incident_url": keep_incident_url,
-                        "keep_alert_fingerprint": fingerprint,
-                        "keep_alert_removed": True,
-                    },
-                    group=keep_incident_id,
-                )
-                resolved.append({"fingerprint": fingerprint, "incident_key": incident_key, "removed": True})
-                self.logger.info(
-                    "PagerDuty alert sync: resolved removed alert",
-                    extra={
-                        "tenant_id": self.context_manager.tenant_id,
-                        "keep_incident_id": keep_incident_id,
-                        "pagerduty_parent_incident_id": pagerduty_parent_incident_id,
-                        "keep_alert_fingerprint": fingerprint,
-                        "pagerduty_incident_key": incident_key,
-                    },
-                )
-            except Exception as e:
-                errors.append({"fingerprint": fingerprint, "incident_key": incident_key, "error": str(e)})
-                self.logger.exception(
-                    "PagerDuty alert sync: failed to resolve removed alert",
-                    extra={
-                        "tenant_id": self.context_manager.tenant_id,
-                        "keep_incident_id": keep_incident_id,
-                        "pagerduty_parent_incident_id": pagerduty_parent_incident_id,
-                        "keep_alert_fingerprint": fingerprint,
-                        "pagerduty_incident_key": incident_key,
-                    },
-                )
-
         result = {
             "action": "sync_incident_alerts_as_pagerduty_alerts",
             "keep_incident_id": keep_incident_id,
@@ -864,12 +875,14 @@ class PagerdutyProvider(
             "alerts_total": len(alerts),
             "alerts_sent": len(created_or_updated),
             "alerts_merged": len(merged),
-            "alerts_resolved": len(resolved),
+            "alerts_resolved": 0,
             "alerts_removed_since_last_sync": len(removed_fingerprints),
-            "pagerduty_synced_alert_fingerprints": sorted(current_fingerprints),
+            "alerts_skipped_already_synced": skipped_already_synced,
+            "alerts_skipped_inactive": skipped_inactive,
+            "pagerduty_synced_alert_fingerprints": sorted(previous_synced_set | newly_synced_fingerprints),
             "events": created_or_updated,
             "merged": merged,
-            "resolved": resolved,
+            "resolved": [],
             "errors": errors,
         }
 
@@ -885,8 +898,10 @@ class PagerdutyProvider(
                 "pagerduty_parent_incident_id": pagerduty_parent_incident_id,
                 "sent": len(created_or_updated),
                 "merged": len(merged),
-                "resolved": len(resolved),
+                "resolved": 0,
                 "errors": len(errors),
+                "skipped_already_synced": skipped_already_synced,
+                "skipped_inactive": skipped_inactive,
             },
         )
 
@@ -1958,9 +1973,35 @@ class PagerdutyProvider(
             labels=metadata,
         )
 
-    def _get_specific_incident(self, incident_id: str):
-        self.logger.info("Getting Incident", extra={"incident_id": incident_id})
-        url = f"{self.BASE_API_URL}/incidents/{incident_id}"
+    def _get_specific_incident(
+        self,
+        incident_id: str,
+        incident_self_url: str | None = None,
+    ):
+        self.logger.info(
+            "Getting Incident",
+            extra={
+                "incident_id": incident_id,
+                "has_incident_self_url": bool(incident_self_url),
+            },
+        )
+
+        url = None
+        if incident_self_url:
+            try:
+                parsed = urllib.parse.urlparse(str(incident_self_url))
+                if (
+                    parsed.scheme == "https"
+                    and parsed.hostname
+                    and parsed.hostname.endswith("pagerduty.com")
+                ):
+                    base = f"{parsed.scheme}://{parsed.netloc}"
+                    url = f"{base}/incidents/{incident_id}"
+            except Exception:
+                url = None
+
+        if not url:
+            url = f"{self.BASE_API_URL}/incidents/{incident_id}"
         params = {
             "include[]": [
                 "acknowledgers",
@@ -2429,7 +2470,10 @@ class PagerdutyProvider(
             and hasattr(provider_instance, "_get_specific_incident")
         ):
             try:
-                response = provider_instance._get_specific_incident(original_incident_id)
+                response = provider_instance._get_specific_incident(
+                    original_incident_id,
+                    incident_self_url=event.get("self"),
+                )
                 if isinstance(response, dict) and isinstance(response.get("incident"), dict):
                     api_incident = response["incident"]
                     incident_key = api_incident.get("incident_key") or incident_key
@@ -2455,6 +2499,21 @@ class PagerdutyProvider(
                         "event_type": event_type,
                     },
                 )
+        if not incident_key:
+            logger.warning(
+                "PagerDuty incident webhook: incident_key missing; cannot classify incident (keep-alert vs external)",
+                extra={
+                    "tenant_id": tenant_id,
+                    "provider_id": provider_id,
+                    "pagerduty_incident_id": original_incident_id,
+                    "event_type": event_type,
+                    "has_api_incident": bool(api_incident),
+                    "incident_self": event.get("self"),
+                    "incident_html_url": event.get("html_url"),
+                    "incident_title": event.get("title"),
+                    "incident_status": event.get("status"),
+                },
+            )
         if isinstance(incident_key, str) and incident_key.startswith(
             KEEP_PD_ALERT_INCIDENT_KEY_PREFIX
         ):
@@ -2661,6 +2720,22 @@ class PagerdutyProvider(
                 },
             )
             return []
+
+        logger.info(
+            "PagerDuty incident webhook: creating Keep incident from PagerDuty incident",
+            extra={
+                "tenant_id": tenant_id,
+                "provider_id": provider_id,
+                "pagerduty_incident_id": original_incident_id,
+                "incident_key": incident_key,
+                "incident_key_source": incident_key_source,
+                "event_type": event_type,
+                "pagerduty_status": status.value if isinstance(status, IncidentStatus) else str(status),
+                "severity": severity.value if hasattr(severity, "value") else str(severity),
+                "service": service,
+                "title": title,
+            },
+        )
 
         return IncidentDto(
             id=incident_id,
