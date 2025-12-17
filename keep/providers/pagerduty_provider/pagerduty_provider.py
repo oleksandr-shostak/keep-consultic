@@ -2128,32 +2128,110 @@ class PagerdutyProvider(
         if not (self.authentication_config.api_key or self.authentication_config.oauth_data):
             return []
 
+        # Consultic behavior: when Keep is the source of truth, we only want to sync
+        # status changes for incidents that Keep originally created in PagerDuty.
+        #
+        # We use the PagerDuty `incident_key` to map back to the Keep incident id
+        # (we set `incident_key` to `incident.id` when creating the parent incident).
+        #
+        # This prevents:
+        # - importing arbitrary PagerDuty incidents into Keep
+        # - Keep↔PagerDuty feedback loops on periodic incident pulls
+        from uuid import UUID
+
+        from keep.api.core.db import get_incident_by_id
+
         raw_incidents = self.__get_all_incidents_or_alerts()
-        incidents = []
-        for incident in raw_incidents:
-            incident_dto = PagerdutyProvider._format_incident(
-                {"event": {"data": incident}}
-            )
-            incident_alerts = self.__get_all_incidents_or_alerts(
-                incident_id=incident_dto.fingerprint
-            )
+
+        incidents: list[IncidentDto] = []
+        skipped_missing_or_invalid_incident_key = 0
+        skipped_missing_keep_incident = 0
+        skipped_no_status_change = 0
+        status_updates = 0
+
+        for pagerduty_incident in raw_incidents:
+            if not isinstance(pagerduty_incident, dict):
+                skipped_missing_or_invalid_incident_key += 1
+                continue
+
+            incident_key = pagerduty_incident.get("incident_key")
+            if not incident_key:
+                skipped_missing_or_invalid_incident_key += 1
+                continue
+
             try:
-                incident_alerts = [
-                    PagerdutyProvider._format_alert(alert, None, force_new_format=True)
-                    for alert in incident_alerts
-                ]
-                incident_dto._alerts = incident_alerts
+                keep_incident_id = UUID(str(incident_key))
+            except Exception:
+                skipped_missing_or_invalid_incident_key += 1
+                continue
+
+            keep_incident = get_incident_by_id(
+                tenant_id=self.context_manager.tenant_id, incident_id=keep_incident_id
+            )
+            if not keep_incident:
+                skipped_missing_keep_incident += 1
+                continue
+
+            pagerduty_status = PagerdutyProvider.INCIDENT_STATUS_MAP.get(
+                pagerduty_incident.get("status") or "triggered",
+                IncidentStatus.FIRING,
+            )
+
+            keep_status = str(getattr(keep_incident, "status", "") or "")
+            if keep_status == pagerduty_status.value:
+                skipped_no_status_change += 1
+                continue
+
+            try:
+                incident_dto = IncidentDto.from_db_incident(keep_incident)
             except Exception:
                 self.logger.exception(
-                    "Failed to format incident alerts",
+                    "PagerDuty incident pull: failed to convert Keep incident to DTO",
                     extra={
                         "provider_id": self.provider_id,
-                        "source_incident_id": incident_dto.fingerprint,
                         "tenant_id": self.context_manager.tenant_id,
-                        "alerts": incident_alerts,
+                        "keep_incident_id": str(keep_incident_id),
+                        "pagerduty_incident_id": pagerduty_incident.get("id"),
+                        "incident_key": str(incident_key),
                     },
                 )
+                continue
+
+            # Only apply the status change; keep all other fields as-is.
+            incident_dto.status = pagerduty_status
+            # Do not sync PagerDuty alerts into Keep incidents in this flow.
+            incident_dto._alerts = []
+
             incidents.append(incident_dto)
+            status_updates += 1
+
+            self.logger.info(
+                "PagerDuty incident pull: status change detected",
+                extra={
+                    "provider_id": self.provider_id,
+                    "tenant_id": self.context_manager.tenant_id,
+                    "keep_incident_id": str(keep_incident_id),
+                    "pagerduty_incident_id": pagerduty_incident.get("id"),
+                    "incident_key": str(incident_key),
+                    "keep_status": keep_status,
+                    "pagerduty_status": pagerduty_status.value,
+                },
+            )
+
+        if status_updates:
+            self.logger.info(
+                "PagerDuty incident pull: summary",
+                extra={
+                    "provider_id": self.provider_id,
+                    "tenant_id": self.context_manager.tenant_id,
+                    "raw_incidents": len(raw_incidents),
+                    "status_updates": status_updates,
+                    "skipped_missing_or_invalid_incident_key": skipped_missing_or_invalid_incident_key,
+                    "skipped_missing_keep_incident": skipped_missing_keep_incident,
+                    "skipped_no_status_change": skipped_no_status_change,
+                },
+            )
+
         return incidents
 
     @staticmethod
