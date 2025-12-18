@@ -36,7 +36,7 @@ const SortableHeaderCell = ({
   return (
     <TableHeaderCell
       className={clsx(
-        "relative bg-tremor-background group",
+        "relative z-30 bg-tremor-background dark:bg-dark-tremor-background group",
         commonClassName,
         className
       )}
@@ -114,7 +114,7 @@ export const IncidentTableComponent = (props: Props) => {
         {table.getRowModel().rows.map((row) => (
           <TableRow
             key={row.id}
-            className="even:bg-tremor-background-muted even:dark:bg-dark-tremor-background-muted"
+            className="bg-tremor-background dark:bg-dark-tremor-background even:bg-tremor-background-muted even:dark:bg-dark-tremor-background-muted"
           >
             {row.getVisibleCells().map((cell) => {
               const { style, className } = getCommonPinningStylesAndClassNames(
@@ -127,7 +127,7 @@ export const IncidentTableComponent = (props: Props) => {
                   className={clsx(
                     cell.column.columnDef.meta?.tdClassName,
                     className,
-                    "bg-white",
+                    "!bg-inherit",
                     cell.column.id === "actions" ? "p-1" : ""
                   )}
                 >
