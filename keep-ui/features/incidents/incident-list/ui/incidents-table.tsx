@@ -21,11 +21,11 @@ import { MergeIncidentsModal } from "@/features/incidents/merge-incidents";
 import { IncidentDropdownMenu } from "./incident-dropdown-menu";
 import clsx from "clsx";
 import { IncidentChangeStatusSelect } from "features/incidents/change-incident-status";
+import { IncidentChangeSeveritySelect } from "features/incidents/change-incident-severity";
 import { useIncidentActions } from "@/entities/incidents/model";
 import { getIncidentName } from "@/entities/incidents/lib/utils";
 import {
   DateTimeField,
-  SeverityLabel,
   TableIndeterminateCheckbox,
   TableSeverityCell,
   UISeverity,
@@ -124,16 +124,17 @@ export default function IncidentsTable({
   const columns = [
     columnHelper.accessor("severity", {
       header: "Severity",
-      cell: ({ getValue }) => {
-        const severity = getValue() as unknown as UISeverity | undefined;
+      cell: ({ row }) => {
+        const severity = row.original.severity as unknown as
+          | UISeverity
+          | undefined;
         return (
           <div className="flex items-center gap-2 py-2 pl-1 pr-2">
             <TableSeverityCell severity={severity} />
-            {severity ? (
-              <SeverityLabel severity={severity} />
-            ) : (
-              <span className="text-sm text-gray-400">—</span>
-            )}
+            <IncidentChangeSeveritySelect
+              incidentId={row.original.id}
+              value={row.original.severity}
+            />
           </div>
         );
       },

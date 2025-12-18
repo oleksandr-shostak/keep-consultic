@@ -281,13 +281,14 @@ export function useIncidentActions(): UseIncidentActionsValue {
         });
 
         toast.success("Incident severity changed successfully!");
+        mutateIncidentsList();
         mutateIncident(incidentId);
         return result;
       } catch (error) {
         showErrorToast(error, "Failed to change incident severity");
       }
     },
-    [api, mutateIncident]
+    [api, mutateIncident, mutateIncidentsList]
   );
 
   // Is it used?
