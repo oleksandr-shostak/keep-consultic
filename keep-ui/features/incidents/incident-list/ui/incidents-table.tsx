@@ -1,4 +1,4 @@
-import { Badge, Card, Subtitle, Title } from "@tremor/react";
+import { Card, Subtitle, Title } from "@tremor/react";
 import {
   ExpandedState,
   createColumnHelper,
@@ -25,6 +25,7 @@ import { useIncidentActions } from "@/entities/incidents/model";
 import { getIncidentName } from "@/entities/incidents/lib/utils";
 import {
   DateTimeField,
+  SeverityLabel,
   TableIndeterminateCheckbox,
   TableSeverityCell,
   UISeverity,
@@ -121,20 +122,27 @@ export default function IncidentsTable({
     useState<IncidentDto | null>();
 
   const columns = [
-    columnHelper.display({
-      id: "severity",
-      header: () => <></>,
-      cell: ({ row }) => (
-        <TableSeverityCell
-          severity={row.original.severity as unknown as UISeverity}
-        />
-      ),
-      size: 4,
-      minSize: 4,
-      maxSize: 4,
+    columnHelper.accessor("severity", {
+      header: "Severity",
+      cell: ({ getValue }) => {
+        const severity = getValue() as unknown as UISeverity | undefined;
+        return (
+          <div className="flex items-center gap-2 py-2 pl-1 pr-2">
+            <TableSeverityCell severity={severity} />
+            {severity ? (
+              <SeverityLabel severity={severity} />
+            ) : (
+              <span className="text-sm text-gray-400">—</span>
+            )}
+          </div>
+        );
+      },
+      size: 120,
+      minSize: 120,
+      maxSize: 160,
       meta: {
         tdClassName: "p-0",
-        thClassName: "p-0",
+        thClassName: "pl-2",
       },
     }),
     columnHelper.display({
@@ -227,31 +235,6 @@ export default function IncidentsTable({
             src={`/icons/${alert_source}-icon.png`}
           />
         )),
-    }),
-    columnHelper.display({
-      id: "services",
-      header: "Involved Services",
-      cell: ({ row }) => {
-        const maxServices = 2;
-        const notNullServices = row.original.services.filter(
-          (service) => service !== "null"
-        );
-        return (
-          <div className="flex flex-wrap items-baseline gap-1">
-            {notNullServices
-              .map((service) => <Badge key={service}>{service}</Badge>)
-              .slice(0, maxServices)}
-            {notNullServices.length > maxServices ? (
-              <span>
-                and{" "}
-                <Link href={`/incidents/${row.original.id}/alerts`}>
-                  {notNullServices.length - maxServices} more
-                </Link>
-              </span>
-            ) : null}
-          </div>
-        );
-      },
     }),
     columnHelper.display({
       id: "assignee",

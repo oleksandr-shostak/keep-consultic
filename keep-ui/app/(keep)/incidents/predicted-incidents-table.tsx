@@ -1,4 +1,4 @@
-import { Button, Badge } from "@tremor/react";
+import { Button } from "@tremor/react";
 import {
   DisplayColumnDef,
   ExpandedState,
@@ -65,19 +65,6 @@ export default function PredictedIncidentsTable({
             src={`/icons/${alert_sources}-icon.png`}
           />
         )),
-    }),
-    columnHelper.display({
-      id: "services",
-      header: "Involved Services",
-      cell: ({ row }) => (
-        <div className="text-wrap">
-          {row.original.services.map((service) => (
-            <Badge key={service} className="mr-1">
-              {service}
-            </Badge>
-          ))}
-        </div>
-      ),
     }),
     columnHelper.display({
       id: "delete",

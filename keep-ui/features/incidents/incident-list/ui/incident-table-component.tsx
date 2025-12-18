@@ -98,7 +98,7 @@ export const IncidentTableComponent = (props: Props) => {
                 <SortableHeaderCell
                   header={header}
                   key={`${header.id}-${index}`}
-                  className={header.column.columnDef.meta?.tdClassName}
+                  className={header.column.columnDef.meta?.thClassName}
                 >
                   {flexRender(
                     header.column.columnDef.header,
