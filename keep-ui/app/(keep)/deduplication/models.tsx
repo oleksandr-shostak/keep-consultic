@@ -5,7 +5,7 @@ export interface DeduplicationRule {
   default: boolean;
   distribution: { hour: number; number: number }[];
   provider_type: string;
-  provider_id: string;
+  provider_id: string | null;
   last_updated: string;
   last_updated_by: string;
   created_at: string;

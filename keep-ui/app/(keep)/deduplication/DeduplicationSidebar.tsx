@@ -328,9 +328,9 @@ const DeduplicationSidebar: React.FC<DeduplicationSidebarProps> = ({
                       }
                       options={alertProviders
                         .filter((provider) => provider.type !== "keep")
-                        .filter((provider) => provider.id && provider.type) // Filter out invalid providers
+                        .filter((provider) => !!provider.type) // Filter out invalid providers
                         .map((provider) => ({
-                          value: `${provider.type}_${provider.id}`,
+                          value: `${provider.type}_${provider.id ?? "null"}`,
                           label:
                             provider.details?.name ||
                             provider.display_name ||
@@ -341,8 +341,13 @@ const DeduplicationSidebar: React.FC<DeduplicationSidebarProps> = ({
                       placeholder="Select provider"
                       onChange={(selectedOption) => {
                         if (selectedOption) {
-                          const [providerType, providerId] =
+                          const [providerType, ...providerIdParts] =
                             selectedOption.value.split("_");
+                          const providerIdRaw = providerIdParts.join("_");
+                          const providerId =
+                            providerIdRaw === "null" || providerIdRaw === ""
+                              ? null
+                              : providerIdRaw;
                           setValue("provider_type", providerType);
                           setValue("provider_id", providerId as any);
                         }
