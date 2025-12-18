@@ -83,14 +83,7 @@ The provider uses either the events API or the incidents API to create an alert 
 
 When using the incidents API, you can pass `incident_key` as an idempotency (dedup) key to look up an existing PagerDuty incident and avoid creating duplicates.
 
-### Sync Keep incident alerts into PagerDuty alerts
-
-If you want PagerDuty users to see Keep alerts under the PagerDuty incident **Alerts** tab, you can sync Keep incident alerts as PagerDuty alerts (Events API) and optionally merge them into the “parent” PagerDuty incident:
-
-- Set `sync_incident_alerts_as_alerts: true` in a PagerDuty workflow action (requires `routing_key`).
-- To attach alerts into the parent incident, set `merge_into_parent: true` and pass the parent PagerDuty incident id as `incident_id` (requires `api_key`/OAuth).
-- Keep-originated alert incidents use an `incident_key` prefix `keep-alert:` and are ignored on inbound webhooks to prevent Keep↔PagerDuty loops.
-- For clickable links back to Keep, set `KEEP_URL` (or `KEEP_UI_URL`) in the Keep backend environment.
+For clickable links back to Keep in incident bodies, set `KEEP_URL` (or `KEEP_UI_URL`) in the Keep backend environment.
 
 An expired trial while using the free version of PagerDuty may result in the "pagerduty scopes are invalid" error at Keep.
 

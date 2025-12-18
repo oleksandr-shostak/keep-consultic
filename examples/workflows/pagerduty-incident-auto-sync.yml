@@ -72,35 +72,6 @@ workflow:
             - Keep Incident ID: {{ incident.id }}
             - PagerDuty Incident ID: {{ actions.create-pagerduty-incident.results.incident.id }}
 
-    - name: sync-pagerduty-alerts-on-create
-      if: "{{ actions.create-pagerduty-incident.results.incident.id }} != ''"
-      provider:
-        type: pagerduty
-        config: "{{ providers.pagerduty2 }}"
-        with:
-          incident_id: "{{ actions.create-pagerduty-incident.results.incident.id }}"
-          requester: "oleksandr.shostak@consultic.com"
-          # Requires provider routing_key (Events API) + api_key/OAuth (merge into parent incident)
-          sync_incident_alerts_as_alerts: true
-          merge_into_parent: true
-          enrich_incident:
-            - key: pagerduty_synced_alert_fingerprints
-              value: results.pagerduty_synced_alert_fingerprints
-
-    - name: sync-pagerduty-alerts-on-update
-      if: "{{ incident.pagerduty_incident_id }} != ''"
-      provider:
-        type: pagerduty
-        config: "{{ providers.pagerduty2 }}"
-        with:
-          incident_id: "{{ incident.pagerduty_incident_id }}"
-          requester: "oleksandr.shostak@consultic.com"
-          sync_incident_alerts_as_alerts: true
-          merge_into_parent: true
-          enrich_incident:
-            - key: pagerduty_synced_alert_fingerprints
-              value: results.pagerduty_synced_alert_fingerprints
-
     - name: acknowledge-pagerduty-incident
       if: "{{ incident.status.value }} == 'acknowledged' and {{ incident.pagerduty_incident_id }} != ''"
       provider:
