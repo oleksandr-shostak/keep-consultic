@@ -3038,8 +3038,17 @@ def get_linked_providers(tenant_id: str) -> List[Tuple[str, str, datetime]]:
 
     with Session(engine) as session:
         alerts_subquery = (
-            select(Alert)
-            .filter(Alert.tenant_id == tenant_id, Alert.provider_type != "group")
+            select(
+                Alert.provider_type,
+                Alert.provider_id,
+                Alert.timestamp,
+            )
+            .filter(
+                Alert.tenant_id == tenant_id,
+                Alert.provider_type != "group",
+            )
+            # Prefer latest alerts to avoid missing active linked providers when LIMIT applies.
+            .order_by(Alert.timestamp.desc())
             .limit(LIMIT_BY_ALERTS)
             .subquery()
         )
@@ -3051,7 +3060,14 @@ def get_linked_providers(tenant_id: str) -> List[Tuple[str, str, datetime]]:
                 func.max(alerts_subquery.c.timestamp).label("last_alert_timestamp"),
             )
             .select_from(alerts_subquery)
-            .filter(~exists().where(Provider.id == alerts_subquery.c.provider_id))
+            .filter(
+                ~exists().where(
+                    and_(
+                        Provider.id == alerts_subquery.c.provider_id,
+                        Provider.tenant_id == tenant_id,
+                    )
+                )
+            )
             .group_by(alerts_subquery.c.provider_type, alerts_subquery.c.provider_id)
         ).all()
 
