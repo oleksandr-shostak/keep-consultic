@@ -22,6 +22,10 @@ type UseIncidentActionsValue = {
     severity: Severity,
     comment?: string
   ) => Promise<void>;
+  changeAssignee: (
+    incidentId: string,
+    assignee: string | null
+  ) => Promise<void>;
   deleteIncident: (
     incidentId: string,
     skipConfirmation?: boolean
@@ -291,6 +295,25 @@ export function useIncidentActions(): UseIncidentActionsValue {
     [api, mutateIncident, mutateIncidentsList]
   );
 
+  const changeAssignee = useCallback(
+    async (incidentId: string, assignee: string | null) => {
+      try {
+        const result = await api.put(
+          `/incidents/${incidentId}?generatedByAi=false`,
+          { assignee }
+        );
+
+        toast.success("Incident assignee changed successfully!");
+        mutateIncidentsList();
+        mutateIncident(incidentId);
+        return result;
+      } catch (error) {
+        showErrorToast(error, "Failed to change incident assignee");
+      }
+    },
+    [api, mutateIncident, mutateIncidentsList]
+  );
+
   // Is it used?
   const confirmPredictedIncident = useCallback(
     async (incidentId: string) => {
@@ -383,6 +406,7 @@ export function useIncidentActions(): UseIncidentActionsValue {
     updateIncident,
     changeStatus,
     changeSeverity,
+    changeAssignee,
     deleteIncident,
     bulkDeleteIncidents,
     mergeIncidents,

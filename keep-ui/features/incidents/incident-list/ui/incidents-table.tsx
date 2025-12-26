@@ -22,6 +22,7 @@ import { IncidentDropdownMenu } from "./incident-dropdown-menu";
 import clsx from "clsx";
 import { IncidentChangeStatusSelect } from "features/incidents/change-incident-status";
 import { IncidentChangeSeveritySelect } from "features/incidents/change-incident-severity";
+import { IncidentChangeAssigneeSelect } from "features/incidents/change-incident-assignee";
 import { useIncidentActions } from "@/entities/incidents/model";
 import { getIncidentName } from "@/entities/incidents/lib/utils";
 import {
@@ -30,7 +31,6 @@ import {
   TableSeverityCell,
   UISeverity,
 } from "@/shared/ui";
-import { UserStatefulAvatar } from "@/entities/users/ui";
 import { DynamicImageProviderIcon } from "@/components/ui";
 import { GenerateReportModal } from "./incidents-report";
 import { DocumentChartBarIcon } from "@heroicons/react/24/outline";
@@ -241,7 +241,10 @@ export default function IncidentsTable({
       id: "assignee",
       header: "Assignee",
       cell: ({ row }) => (
-        <UserStatefulAvatar email={row.original.assignee} size="xs" />
+        <IncidentChangeAssigneeSelect
+          incidentId={row.original.id}
+          value={row.original.assignee}
+        />
       ),
     }),
     columnHelper.accessor("creation_time", {
