@@ -1,111 +1,82 @@
 workflow:
-  id: ai-alert-triage-assistant
-  description: Use OpenAI Assistant to triage alerts with knowledge base access
+  id: ai_alert_triage_openai
+  name: "AI Alert Triage with OpenAI"
+  description: Use OpenAI to analyze each alert and decide if it should be escalated to WARNING or HIGH
+  disabled: false
   triggers:
     - type: alert
-      filters:
-        - key: source
-          value: ".*"  # All sources
-        - key: severity
-          value: "critical|high"  # Only critical/high severity
-  
-  actions:
-    # Step 1: Analyze the alert using OpenAI Assistant
-    - name: analyze_with_assistant
+      cel: "providerType == 'mailgun' && severity == 'info'"
+  steps:
+    - name: ai_analyze_alert
       provider:
         type: openaiassistant
-        config: "{{ providers.my_openai_assistant }}"
+        config: "{{ providers.Triage }}"
         with:
           prompt: |
-            Analyze this alert and provide recommendations:
-            
-            Alert Details:
-            - Name: {{ alert.name }}
-            - Message: {{ keep.slice(alert.message, 0, 1000) }}
-            - Severity: {{ alert.severity }}
+            Analyze this alert and decide the escalation severity:
+            **Alert Name:** {{ alert.name }}
             - Source: {{ alert.source }}
-            - Status: {{ alert.status }}
-            
-            Please provide:
-            1. Root cause analysis based on company knowledge base
-            2. Recommended action (escalate, investigate, resolve)
-            3. Severity assessment
-            4. Related incidents or alerts from history
-            
-            Respond in JSON format with keys:
-            - action: "escalate" | "investigate" | "resolve"
-            - reason: string
-            - severity: "critical" | "high" | "medium" | "low"
-            - related_docs: array of relevant documentation links
-          max_wait_time: 60
-          parse_json: true
-    
-    # Step 2: Log the analysis
-    - name: log_analysis
-      provider:
-        type: console
-        with:
-          message: |
-            AI Analysis Complete:
-            Action: {{ steps.analyze_with_assistant.results.response.action }}
-            Reason: {{ steps.analyze_with_assistant.results.response.reason }}
-            Severity: {{ steps.analyze_with_assistant.results.response.severity }}
-    
-    # Step 3: If action is "escalate", notify Slack
-    - name: notify_slack
-      if: "{{ steps.analyze_with_assistant.results.response.action == 'escalate' }}"
-      provider:
-        type: slack
-        config: "{{ providers.slack }}"
-        with:
-          message: |
-            🚨 *ALERT ESCALATION REQUIRED*
-            
-            *Alert:* {{ alert.name }}
-            *Severity:* {{ steps.analyze_with_assistant.results.response.severity | upper }}
-            
-            *AI Analysis:*
-            {{ steps.analyze_with_assistant.results.response.reason }}
-            
-            *Recommended Action:* Escalate immediately
-            
-            *Thread ID:* {{ steps.analyze_with_assistant.results.thread_id }}
-            (Use this to continue conversation with assistant)
-    
-    # Step 4: If action is "resolve", resolve the alert
-    - name: auto_resolve
-      if: "{{ steps.analyze_with_assistant.results.response.action == 'resolve' }}"
+            **Status:** {{ alert.status }}
+            **Description:** {{ alert.description }}
+            **Message:** {{ alert.message }}
+
+            Determine if this alert should be escalated to:
+            1. HIGH (production outages, security issues, data loss, critical service failures)
+            2. WARNING (actionable but not critical)
+
+            Respond ONLY with valid JSON in this exact format:
+
+            {"recommended_severity": "warning", "reason": "brief explanation"}
+            OR
+            {"recommended_severity": "high", "reason": "brief explanation"}
+  actions:
+    - name: escalate_to_warning
+      if: "'{{ steps.ai_analyze_alert.results.response.recommended_severity }}' == 'warning'"
       provider:
         type: keep
-        config: "{{ providers.keep }}"
+        config: "{{ providers.default-keep }}"
         with:
-          enrich:
-            alert:
-              - key: status
-                value: "resolved"
-              - key: ai_analysis
-                value: "{{ steps.analyze_with_assistant.results.response.reason }}"
-              - key: ai_severity
-                value: "{{ steps.analyze_with_assistant.results.response.severity }}"
-    
-    # Step 5: Ask follow-up question in same thread
-    - name: get_remediation_steps
-      if: "{{ steps.analyze_with_assistant.results.response.action != 'resolve' }}"
-      provider:
-        type: openaiassistant
-        config: "{{ providers.my_openai_assistant }}"
-        with:
-          prompt: "What are the specific remediation steps for this alert?"
-          thread_id: "{{ steps.analyze_with_assistant.results.thread_id }}"
-          max_wait_time: 30
-    
-    # Step 6: Log remediation steps
-    - name: log_remediation
-      if: "{{ steps.get_remediation_steps.results is defined }}"
-      provider:
-        type: console
-        with:
-          message: |
-            Remediation Steps:
-            {{ steps.get_remediation_steps.results.response }}
+          read_only: true
+          alert:
+            name: "AI: {{ alert.name }}"
+            status: firing
+            severity: warning
+            message: |
+              AI ESCALATION: This alert has been automatically escalated to WARNING priority.
 
+              AI Analysis: {{ steps.ai_analyze_alert.results.response.reason }}
+
+              Original Alert Details:
+              - Name: {{ alert.name }}
+              - Description: {{ alert.description }}
+
+              === Original Message ===
+              {{ alert.message }}
+
+              View original alert ID: {{ alert.id }}
+            fingerprint: "ai-escalated-{{ alert.fingerprint }}"
+    - name: escalate_to_high
+      if: "'{{ steps.ai_analyze_alert.results.response.recommended_severity }}' == 'high'"
+      provider:
+        type: keep
+        config: "{{ providers.default-keep }}"
+        with:
+          read_only: true
+          alert:
+            name: "AI: {{ alert.name }}"
+            status: firing
+            severity: high
+            message: |
+              AI ESCALATION: This alert has been automatically escalated to HIGH priority.
+
+              AI Analysis: {{ steps.ai_analyze_alert.results.response.reason }}
+
+              Original Alert Details:
+              - Name: {{ alert.name }}
+              - Description: {{ alert.description }}
+
+              === Original Message ===
+              {{ alert.message }}
+
+              View original alert ID: {{ alert.id }}
+            fingerprint: "ai-escalated-{{ alert.fingerprint }}"
