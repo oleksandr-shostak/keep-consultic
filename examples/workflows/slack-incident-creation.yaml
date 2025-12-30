@@ -1,0 +1,28 @@
+workflow:
+  id: notify_slack_on_incident
+  name: "Notify Slack on Incident Creation (Business hours)"
+  description: Send Slack notification for incidents during working hours with alert details
+  disabled: false
+  triggers:
+    - type: incident
+      events:
+        - created
+  actions:
+    - name: notify_slack
+      if: "keep.is_business_hours(start_hour=7, end_hour=20, timezone='Europe/Paris')"
+      provider:
+        type: slack
+        config: "{{ providers.Keep_slack }}"
+        with:
+          channel: "#oncall"
+          message: "*Name:* {{ incident.user_generated_name }}
+
+            *Severity:* {{ incident.severity }}
+
+            *Alerts:* {{ incident.alerts_count }}
+
+            *Alert Name:* keep.get_alert_field(incident, 'name', 'N/A')
+
+            *Alert Message:* keep.get_alert_field(incident, 'message', 'No message')
+
+            🔗 View: https://keep-zpz9.consultic.tech/incidents/{{ incident.id }}"
