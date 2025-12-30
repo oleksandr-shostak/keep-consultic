@@ -15,7 +15,7 @@ workflow:
         config: "{{ providers.Keep_slack }}"
         with:
           channel: "#oncall"
-          message: "*Name:* {{ incident.user_generated_name }}
+          message: "*INCIDENT:* {{ incident.user_generated_name }}
 
             *Severity:* {{ incident.severity }}
 
