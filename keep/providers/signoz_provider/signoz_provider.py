@@ -182,18 +182,18 @@ Alternatively, use the automatic setup by clicking "Connect" with your SigNoz AP
         webhook_name = f"keep-{tenant_id}"
 
         # SigNoz webhook payload format (Alertmanager style)
-        # Uses Bearer token authorization for Keep API authentication
+        # Keep expects X-API-KEY header, but SigNoz/Alertmanager doesn't support custom headers.
+        # Nginx maps ?api_key=... query param to X-API-KEY header, so we append the key to URL.
+        url_separator = "&" if "?" in keep_api_url else "?"
+        webhook_url = f"{keep_api_url}{url_separator}api_key={api_key}"
+
         webhook_payload = {
             "name": webhook_name,
             "webhook_configs": [
                 {
                     "send_resolved": True,
-                    "url": keep_api_url,
+                    "url": webhook_url,
                     "http_config": {
-                        "authorization": {
-                            "type": "Bearer",
-                            "credentials": api_key,
-                        },
                         "tls_config": {
                             "insecure_skip_verify": False,
                         },

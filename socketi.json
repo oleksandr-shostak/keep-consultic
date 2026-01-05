@@ -1,0 +1,11 @@
+{
+  "debug": false,
+  "port": 6001,
+  "metrics": { "enabled": false },
+  "defaultAppId": "1",
+  "defaultKey": "keepappkey-zpz9",
+  "defaultSecret": "soketi_Zpz9!bV4r2Qm7nDx1cY6pL8gJ5fK0sT3wE",
+  "cors": ["*"],
+  "sslCert": "",
+  "sslKey": ""
+}
