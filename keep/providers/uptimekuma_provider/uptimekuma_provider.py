@@ -8,7 +8,7 @@ import pydantic
 from socketio.exceptions import BadNamespaceError
 from uptime_kuma_api import UptimeKumaApi
 
-from keep.api.models.alert import AlertDto, AlertStatus
+from keep.api.models.alert import AlertDto, AlertSeverity, AlertStatus
 from keep.contextmanager.contextmanager import ContextManager
 from keep.providers.base.base_provider import BaseProvider
 from keep.providers.models.provider_config import ProviderConfig, ProviderScope
@@ -72,6 +72,22 @@ class UptimekumaProvider(BaseProvider):
         "1": AlertStatus.RESOLVED.value,
         1: AlertStatus.RESOLVED.value,
         "resolved": AlertStatus.RESOLVED.value,
+    }
+
+    SEVERITY_MAP = {
+        # Down = Critical
+        "down": AlertSeverity.CRITICAL,
+        "unavailable": AlertSeverity.CRITICAL,
+        "firing": AlertSeverity.CRITICAL,
+        "0": AlertSeverity.CRITICAL,
+        0: AlertSeverity.CRITICAL,
+
+        # Up/Resolved = Info
+        "up": AlertSeverity.INFO,
+        "available": AlertSeverity.INFO,
+        "1": AlertSeverity.INFO,
+        1: AlertSeverity.INFO,
+        "resolved": AlertSeverity.INFO,
     }
 
     def __init__(
@@ -139,6 +155,7 @@ class UptimekumaProvider(BaseProvider):
                     monitor_id=heartbeat["monitor_id"],
                     description=heartbeat["msg"],
                     status=self.STATUS_MAP.get(heartbeat["status"], "firing"),
+                    severity=self.SEVERITY_MAP.get(heartbeat["status"], AlertSeverity.CRITICAL),
                     lastReceived=self._format_datetime(heartbeat["localDateTime"], heartbeat["timezoneOffset"]),
                     ping=heartbeat["ping"],
                     source=["uptimekuma"],
@@ -164,11 +181,13 @@ class UptimekumaProvider(BaseProvider):
     def _format_alert(
         cls, event: dict, provider_instance: "BaseProvider" = None
     ) -> AlertDto:
+        status = event["heartbeat"]["status"]
         alert = AlertDto(
             id=event["monitor"]["id"],
             name=event["monitor"]["name"],
             monitor_url=event["monitor"]["url"],
-            status=cls.STATUS_MAP.get(event["heartbeat"]["status"], "firing"),
+            status=cls.STATUS_MAP.get(status, "firing"),
+            severity=cls.SEVERITY_MAP.get(status, AlertSeverity.CRITICAL),
             description=event["msg"],
             lastReceived=cls._format_datetime(event["heartbeat"]["localDateTime"], event["heartbeat"]["timezoneOffset"]),
             msg=event["heartbeat"]["msg"],
