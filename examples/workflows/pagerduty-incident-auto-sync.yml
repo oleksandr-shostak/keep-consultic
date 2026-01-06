@@ -10,9 +10,9 @@ workflow:
 
   actions:
     - name: create-pagerduty-incident
-      # Create only once (avoid duplicates on incident updates)
-      # Only sync high/critical incidents to PagerDuty
-      if: "{{ incident.status.value }} == 'firing' and {{ incident.severity.value }} in ['critical','high'] and {{ incident.pagerduty_incident_id }} == ''"
+      # Only sync critical incidents to PagerDuty
+      # Provider handles idempotency via incident_key - won't create duplicates
+      if: "{{ incident.status.value }} == 'firing' and {{ incident.severity.value }} == 'critical'"
       provider:
         type: pagerduty
         config: "{{ providers.pagerduty2 }}"
@@ -56,12 +56,6 @@ workflow:
 
               Alert Description:
               keep.get_alert_field(incident, 'description', 'N/A', 0)
-          enrich_incident:
-            - key: pagerduty_incident_id
-              value: results.incident.id
-            - key: pagerduty_incident_key
-              value: "{{ incident.id }}"
-
     - name: log-pagerduty-created
       if: "{{ actions.create-pagerduty-incident.results.incident.id }} != ''"
       provider:
@@ -73,12 +67,13 @@ workflow:
             - PagerDuty Incident ID: {{ actions.create-pagerduty-incident.results.incident.id }}
 
     - name: acknowledge-pagerduty-incident
-      if: "{{ incident.status.value }} == 'acknowledged' and {{ incident.pagerduty_incident_id }} != ''"
+      # Acknowledge when incident is acknowledged in Keep and was originally critical
+      if: "{{ incident.status.value }} == 'acknowledged' and {{ incident.severity.value }} == 'critical'"
       provider:
         type: pagerduty
         config: "{{ providers.pagerduty2 }}"
         with:
-          incident_id: "{{ incident.pagerduty_incident_id }}"
+          # PagerDuty finds incident by incident_key (no incident_id needed)
           incident_key: "{{ incident.id }}"
           service_id: "P7CU6TM"
           title: "{{ incident.name }}"
@@ -89,7 +84,7 @@ workflow:
             details: "Incident acknowledged in Keep at {{ incident.last_seen_time }}"
 
     - name: log-pagerduty-acknowledged
-      if: "{{ incident.status.value }} == 'acknowledged' and {{ incident.pagerduty_incident_id }} != ''"
+      if: "{{ incident.status.value }} == 'acknowledged' and {{ incident.severity.value }} == 'critical'"
       provider:
         type: console
         with:
@@ -99,12 +94,13 @@ workflow:
             - PagerDuty Incident ID: {{ incident.pagerduty_incident_id }}
 
     - name: resolve-pagerduty-incident
-      if: "{{ incident.status.value }} == 'resolved' and {{ incident.pagerduty_incident_id }} != ''"
+      # Resolve when incident is resolved in Keep and was originally critical
+      if: "{{ incident.status.value }} == 'resolved' and {{ incident.severity.value }} == 'critical'"
       provider:
         type: pagerduty
         config: "{{ providers.pagerduty2 }}"
         with:
-          incident_id: "{{ incident.pagerduty_incident_id }}"
+          # PagerDuty finds incident by incident_key (no incident_id needed)
           incident_key: "{{ incident.id }}"
           service_id: "P7CU6TM"
           title: "{{ incident.name }}"
@@ -126,7 +122,7 @@ workflow:
               Resolved By: {{ incident.assignee }}
 
     - name: log-pagerduty-resolved
-      if: "{{ incident.status.value }} == 'resolved' and {{ incident.pagerduty_incident_id }} != ''"
+      if: "{{ incident.status.value }} == 'resolved' and {{ incident.severity.value }} == 'critical'"
       provider:
         type: console
         with:
