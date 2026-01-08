@@ -380,7 +380,9 @@ Alternatively, use the automatic setup by clicking "Connect" with your SigNoz AP
                         tz=datetime.timezone.utc
                     ).isoformat()
 
-                # Get description from annotations
+                # Get message and description from annotations
+                # message = short summary, description = detailed explanation
+                message = annotations.get("summary", "")
                 description = annotations.get(
                     "description", annotations.get("summary", "")
                 )
@@ -415,6 +417,7 @@ Alternatively, use the automatic setup by clicking "Connect" with your SigNoz AP
                     environment=environment,
                     service=service if service else None,
                     lastReceived=last_received,
+                    message=message if message else None,
                     description=description,
                     source=["signoz"],
                     labels=labels,
