@@ -22,20 +22,26 @@ logger = logging.getLogger(__name__)
 class SignozProviderAuthConfig:
     """
     SigNoz authentication configuration.
+
+    All fields are optional - the provider can work as a webhook-only receiver
+    without connecting to SigNoz. Just configure the webhook manually in SigNoz
+    to send alerts to Keep's webhook endpoint.
     """
 
-    host: str = dataclasses.field(
+    host: str | None = dataclasses.field(
+        default=None,
         metadata={
-            "required": True,
-            "description": "SigNoz host URL",
+            "required": False,
+            "description": "SigNoz host URL (optional - only needed for automatic webhook setup)",
             "hint": "e.g. https://signoz.example.com",
             "validation": "any_http_url",
         },
     )
-    api_key: str = dataclasses.field(
+    api_key: str | None = dataclasses.field(
+        default=None,
         metadata={
-            "required": True,
-            "description": "SigNoz API Key",
+            "required": False,
+            "description": "SigNoz API Key (optional - only needed for automatic webhook setup)",
             "hint": "Your SIGNOZ-API-KEY for authentication",
             "sensitive": True,
         },
@@ -55,13 +61,13 @@ class SignozProvider(BaseProvider):
     PROVIDER_SCOPES = [
         ProviderScope(
             name="alerts:read",
-            description="Required for validating connection to SigNoz",
-            mandatory=True,
+            description="Optional - only needed if connecting to SigNoz API",
+            mandatory=False,
             mandatory_for_webhook=False,
         ),
         ProviderScope(
             name="channels:write",
-            description="Required for automatic webhook setup",
+            description="Optional - only needed for automatic webhook setup in SigNoz",
             mandatory=False,
             mandatory_for_webhook=True,
         ),
@@ -110,14 +116,32 @@ Alternatively, use the automatic setup by clicking "Connect" with your SigNoz AP
         pass
 
     def validate_config(self):
-        """Validates required configuration for SigNoz provider."""
+        """Validates required configuration for SigNoz provider.
+
+        No fields are required - the provider can work as a webhook-only receiver.
+        """
+        if self.config.authentication is None:
+            self.config.authentication = {}
         self.authentication_config = SignozProviderAuthConfig(
             **self.config.authentication
         )
 
     def validate_scopes(self) -> dict[str, bool | str]:
-        """Validate that the API key has required permissions."""
+        """Validate that the API key has required permissions.
+
+        If no host/api_key is configured, skip validation - the provider
+        will work as a webhook-only receiver.
+        """
         validated_scopes = {}
+
+        # If no auth configured, skip validation - webhook-only mode
+        if not self.authentication_config.host or not self.authentication_config.api_key:
+            logger.info("SigNoz provider configured in webhook-only mode (no host/api_key)")
+            # Return scopes as skipped since we're in webhook-only mode
+            validated_scopes["alerts:read"] = "Skipped (webhook-only mode)"
+            validated_scopes["channels:write"] = "Skipped (webhook-only mode)"
+            return validated_scopes
+
         headers = {"SIGNOZ-API-KEY": self.authentication_config.api_key}
         host = str(self.authentication_config.host).rstrip("/")
 
@@ -171,7 +195,18 @@ Alternatively, use the automatic setup by clicking "Connect" with your SigNoz AP
 
         SigNoz uses the Alertmanager API format for channels:
         https://signoz.io/docs/alerts-management/notification-channel/webhook/
+
+        If no host/api_key is configured, this method will skip setup and
+        the user should configure the webhook manually in SigNoz.
         """
+        # Skip webhook setup if no auth configured (webhook-only mode)
+        if not self.authentication_config.host or not self.authentication_config.api_key:
+            self.logger.info(
+                "Skipping automatic webhook setup - no SigNoz host/api_key configured. "
+                "Please configure the webhook manually in SigNoz."
+            )
+            return
+
         self.logger.info("Setting up SigNoz webhook")
 
         headers = {
