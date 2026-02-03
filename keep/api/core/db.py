@@ -5549,9 +5549,22 @@ def is_edge_incident_alert_resolved(
         )
         status_field = get_json_extract_field(session, Alert.event, "status")
 
-        finerprint, enriched_status, status = session.exec(
-            select(Alert.fingerprint, enriched_status_field, status_field)
-            .select_from(Alert)
+        order_clause = (
+            LastAlert.timestamp.desc()
+            if direction == func.max
+            else LastAlert.timestamp.asc()
+        )
+        row = session.exec(
+            select(LastAlert.fingerprint, enriched_status_field, status_field)
+            .select_from(LastAlertToIncident)
+            .join(
+                LastAlert,
+                and_(
+                    LastAlert.tenant_id == LastAlertToIncident.tenant_id,
+                    LastAlert.fingerprint == LastAlertToIncident.fingerprint,
+                ),
+            )
+            .join(Alert, LastAlert.alert_id == Alert.id)
             .outerjoin(
                 AlertEnrichment,
                 and_(
@@ -5559,19 +5572,18 @@ def is_edge_incident_alert_resolved(
                     Alert.fingerprint == AlertEnrichment.alert_fingerprint,
                 ),
             )
-            .join(
-                LastAlertToIncident,
-                and_(
-                    LastAlertToIncident.tenant_id == Alert.tenant_id,
-                    LastAlertToIncident.fingerprint == Alert.fingerprint,
-                ),
+            .where(
+                LastAlertToIncident.incident_id == incident.id,
+                LastAlertToIncident.tenant_id == incident.tenant_id,
+                LastAlertToIncident.deleted_at == NULL_FOR_DELETED_AT,
             )
-            .where(LastAlertToIncident.incident_id == incident.id)
-            .group_by(Alert.fingerprint)
-            .having(func.max(Alert.timestamp))
-            .order_by(direction(Alert.timestamp))
+            .order_by(order_clause)
         ).first()
 
+        if not row:
+            return False
+
+        _fingerprint, enriched_status, status = row
         return enriched_status == AlertStatus.RESOLVED.value or (
             enriched_status is None and status == AlertStatus.RESOLVED.value
         )
