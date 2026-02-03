@@ -2353,6 +2353,14 @@ class PagerdutyProvider(
     def _format_incident(
         event: dict, provider_instance: "BaseProvider" = None
     ) -> IncidentDto | list[IncidentDto]:
+        raw_event = event
+
+        def _extract_event_meta(raw: typing.Any) -> dict:
+            if not isinstance(raw, dict):
+                return {}
+            if isinstance(raw.get("event"), dict):
+                return raw.get("event") or {}
+            return {}
 
         def _parse_datetime(value: typing.Any) -> datetime.datetime | None:
             if not value:
@@ -2383,6 +2391,87 @@ class PagerdutyProvider(
                     parsed = parsed.replace(tzinfo=datetime.timezone.utc)
                 return parsed
             return None
+
+        def _parse_sync_time(value: typing.Any) -> datetime.datetime | None:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return datetime.datetime.fromtimestamp(
+                    float(value), tz=datetime.timezone.utc
+                )
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.isdigit():
+                    return datetime.datetime.fromtimestamp(
+                        float(stripped), tz=datetime.timezone.utc
+                    )
+                if stripped:
+                    return _parse_datetime(stripped)
+            return _parse_datetime(value)
+
+        def _coerce_list(value: typing.Any) -> list:
+            if value is None:
+                return []
+            if isinstance(value, (list, tuple, set)):
+                return list(value)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    try:
+                        loaded = json.loads(stripped)
+                        if isinstance(loaded, list):
+                            return loaded
+                    except Exception:
+                        pass
+            return [value]
+
+        def _actor_tokens(values: typing.Iterable[typing.Any]) -> set[str]:
+            tokens: set[str] = set()
+            for value in values:
+                if value is None:
+                    continue
+                if isinstance(value, (list, tuple, set)):
+                    tokens.update(_actor_tokens(value))
+                    continue
+                raw = str(value).strip()
+                if not raw:
+                    continue
+                lowered = raw.lower()
+                tokens.add(lowered)
+                canonical = re.sub(r"[^a-z0-9]+", "", lowered)
+                if canonical:
+                    tokens.add(canonical)
+                if "@" in lowered:
+                    local = lowered.split("@", 1)[0]
+                    tokens.add(local)
+                    local_canon = re.sub(r"[^a-z0-9]+", "", local)
+                    if local_canon:
+                        tokens.add(local_canon)
+            return tokens
+
+        def _normalize_actor(value: typing.Any) -> dict:
+            if isinstance(value, dict):
+                return {
+                    "id": value.get("id"),
+                    "type": value.get("type"),
+                    "summary": value.get("summary") or value.get("name"),
+                    "email": value.get("email"),
+                }
+            if isinstance(value, str):
+                return {"summary": value}
+            return {}
+
+        def _extract_actor_info(event_meta: dict, incident_payload: dict) -> dict:
+            for candidate in (
+                event_meta.get("agent"),
+                event_meta.get("actor"),
+                incident_payload.get("last_status_change_by"),
+                incident_payload.get("last_updated_by"),
+            ):
+                actor = _normalize_actor(candidate)
+                if actor.get("summary") or actor.get("email") or actor.get("id"):
+                    return actor
+            return {}
 
         def _extract_incident_payload(
             raw: dict,
@@ -2428,11 +2517,18 @@ class PagerdutyProvider(
                 )
                 if not incident_payload:
                     continue
+                event_meta = {}
+                if isinstance(message, dict) and isinstance(message.get("event"), dict):
+                    msg_event = message.get("event") or {}
+                    for key in ("agent", "actor", "client", "occurred_at", "event_type"):
+                        if key in msg_event:
+                            event_meta[key] = msg_event.get(key)
                 formatted = PagerdutyProvider._format_incident(
                     {
                         "event": {
                             "data": incident_payload,
                             "event_type": _event_type,
+                            **event_meta,
                         },
                         "created_on": message_created_on,
                     },
@@ -2446,6 +2542,16 @@ class PagerdutyProvider(
 
         incident_payload, message_created_on, event_type = _extract_incident_payload(event)
         event = incident_payload or {}
+        event_meta = _extract_event_meta(raw_event)
+        actor_info = _extract_actor_info(event_meta, event)
+        event_time = _parse_datetime(
+            event_meta.get("occurred_at")
+            or event_meta.get("created_on")
+            or event_meta.get("created_at")
+            or message_created_on
+            or event.get("last_status_change_at")
+            or event.get("created_at")
+        )
 
         # This will be the same for the same incident
         original_incident_id = event.get("id")
@@ -2718,6 +2824,100 @@ class PagerdutyProvider(
                 event.get("status", "firing"), IncidentStatus.FIRING
             )
             keep_status_value = str(getattr(keep_incident, "status", "") or "")
+            sync_metadata = {}
+            try:
+                from keep.api.core.db import get_enrichment
+
+                enrichment = get_enrichment(tenant_id, str(keep_incident_id))
+                if enrichment:
+                    sync_metadata = enrichment.enrichments or {}
+            except Exception:
+                logger.exception(
+                    "PagerDuty incident webhook: failed loading sync metadata",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "provider_id": provider_id,
+                        "pagerduty_incident_id": original_incident_id,
+                        "incident_key": incident_key,
+                        "event_type": event_type,
+                        "keep_incident_id": str(keep_incident_id),
+                    },
+                )
+
+            sync_actor = sync_metadata.get("pd_sync_actor")
+            sync_actors = sync_metadata.get("pd_sync_actors")
+            last_sync_status = sync_metadata.get("pd_last_sync_status")
+            last_sync_at = sync_metadata.get("pd_last_sync_at")
+
+            last_sync_at_dt = _parse_sync_time(last_sync_at)
+            sync_actor_tokens = _actor_tokens(
+                _coerce_list(sync_actor) + _coerce_list(sync_actors)
+            )
+            event_actor_tokens = _actor_tokens(
+                [
+                    actor_info.get("email"),
+                    actor_info.get("summary"),
+                    actor_info.get("id"),
+                ]
+                if actor_info
+                else []
+            )
+            if sync_actor_tokens and event_actor_tokens and sync_actor_tokens.intersection(event_actor_tokens):
+                logger.info(
+                    "PagerDuty incident webhook: ignoring Keep-originated echo event",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "provider_id": provider_id,
+                        "pagerduty_incident_id": original_incident_id,
+                        "incident_key": incident_key,
+                        "event_type": event_type,
+                        "keep_incident_id": str(keep_incident_id),
+                        "actor_tokens": sorted(event_actor_tokens),
+                        "sync_actor_tokens": sorted(sync_actor_tokens),
+                    },
+                )
+                return []
+
+            if event_time and last_sync_at_dt and event_time <= last_sync_at_dt:
+                logger.info(
+                    "PagerDuty incident webhook: ignoring out-of-order/echo event",
+                    extra={
+                        "tenant_id": tenant_id,
+                        "provider_id": provider_id,
+                        "pagerduty_incident_id": original_incident_id,
+                        "incident_key": incident_key,
+                        "event_type": event_type,
+                        "keep_incident_id": str(keep_incident_id),
+                        "event_time": event_time.isoformat(),
+                        "last_sync_at": last_sync_at_dt.isoformat(),
+                        "last_sync_status": last_sync_status,
+                        "pagerduty_status": pagerduty_status.value,
+                        "keep_status": keep_status_value,
+                    },
+                )
+                return []
+
+            if (not actor_info) and (not event_time) and last_sync_at_dt and last_sync_status:
+                if str(last_sync_status).lower() == pagerduty_status.value.lower():
+                    now = datetime.datetime.now(tz=datetime.timezone.utc)
+                    if now - last_sync_at_dt <= datetime.timedelta(seconds=120):
+                        logger.info(
+                            "PagerDuty incident webhook: ignoring recent Keep-originated echo event without actor",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "provider_id": provider_id,
+                                "pagerduty_incident_id": original_incident_id,
+                                "incident_key": incident_key,
+                                "event_type": event_type,
+                                "keep_incident_id": str(keep_incident_id),
+                                "last_sync_at": last_sync_at_dt.isoformat(),
+                                "last_sync_status": last_sync_status,
+                                "pagerduty_status": pagerduty_status.value,
+                                "keep_status": keep_status_value,
+                            },
+                        )
+                        return []
+
             if keep_status_value == pagerduty_status.value:
                 logger.info(
                     "PagerDuty incident webhook: Keep incident status already matches; skipping",
@@ -2739,6 +2939,13 @@ class PagerdutyProvider(
             keep_incident_dto = IncidentDto.from_db_incident(keep_incident)
             keep_incident_dto.status = pagerduty_status
             keep_incident_dto._alerts = []
+            keep_incident_dto.status_source = "pagerduty"
+            if event_time:
+                keep_incident_dto.status_changed_at = event_time
+            if actor_info:
+                keep_incident_dto.status_changed_by = (
+                    actor_info.get("email") or actor_info.get("summary")
+                )
             if pagerduty_status == IncidentStatus.RESOLVED:
                 keep_incident_dto.end_time = datetime.datetime.now(tz=datetime.timezone.utc)
 
@@ -2811,6 +3018,13 @@ class PagerdutyProvider(
             services=[service],
             is_predicted=False,
             is_candidate=False,
+            status_source="pagerduty",
+            status_changed_at=event_time,
+            status_changed_by=(
+                actor_info.get("email") or actor_info.get("summary")
+                if isinstance(actor_info, dict)
+                else None
+            ),
             # This is the reference to the incident in PagerDuty
             fingerprint=original_incident_id,
         )

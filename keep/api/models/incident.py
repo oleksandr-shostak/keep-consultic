@@ -71,6 +71,10 @@ class IncidentDto(IncidentDtoIn):
     alerts_count: int
     alert_sources: list[str]
     status: IncidentStatus = IncidentStatus.FIRING
+    previous_status: IncidentStatus | None = None
+    status_source: str | None = None
+    status_changed_at: datetime.datetime | None = None
+    status_changed_by: str | None = None
     assignee: str | None
     services: list[str]
 
@@ -168,6 +172,17 @@ class IncidentDto(IncidentDtoIn):
             )
             values["status"] = IncidentStatus.FIRING
         return values
+
+    @validator("previous_status", pre=True)
+    @classmethod
+    def normalize_previous_status(cls, value):
+        if value is None or isinstance(value, IncidentStatus):
+            return value
+        try:
+            return IncidentStatus(value)
+        except ValueError:
+            return None
+
 
     @classmethod
     def from_db_incident(cls, db_incident: "Incident", rule: "Rule" = None):

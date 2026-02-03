@@ -102,6 +102,9 @@ class IncidentBl:
             extra={"incident_id": incident.id, "tenant_id": self.tenant_id},
         )
         new_incident_dto = IncidentDto.from_db_incident(incident)
+        self._apply_context_overrides(
+            new_incident_dto, source_dto=incident_dto, previous_status=None
+        )
         self.logger.info(
             "Incident DTO created",
             extra={"incident_id": new_incident_dto.id, "tenant_id": self.tenant_id},
@@ -311,10 +314,23 @@ class IncidentBl:
                 "tenant_id": self.tenant_id,
             },
         )
+        previous_status = None
+        try:
+            current_incident = get_incident_by_id(
+                self.tenant_id, incident_id, session=self.session
+            )
+        except (ValueError, LookupError):
+            current_incident = None
+        if current_incident and current_incident.status:
+            previous_status = self._coerce_incident_status(current_incident.status)
         incident = update_incident_from_dto_by_id(
             self.tenant_id, incident_id, updated_incident_dto, generated_by_ai
         )
-        return self.__postprocess_incident_change(incident)
+        return self.__postprocess_incident_change(
+            incident,
+            previous_status=previous_status,
+            source_dto=updated_incident_dto,
+        )
 
     def __postprocess_alerts_change(self, incident, alert_fingerprints):
 
@@ -357,6 +373,16 @@ class IncidentBl:
                 "tenant_id": self.tenant_id,
             },
         )
+        previous_status = None
+        try:
+            current_incident = get_incident_by_id(
+                self.tenant_id, incident_id, session=self.session
+            )
+        except (ValueError, LookupError):
+            current_incident = None
+        if current_incident and current_incident.status:
+            previous_status = self._coerce_incident_status(current_incident.status)
+
         incident = update_incident_severity(
             self.tenant_id,
             incident_id,
@@ -372,13 +398,29 @@ class IncidentBl:
                 comment,
             )
 
-        return self.__postprocess_incident_change(incident)
+        return self.__postprocess_incident_change(incident, previous_status=previous_status)
 
-    def __postprocess_incident_change(self, incident):
+    def __postprocess_incident_change(
+        self,
+        incident,
+        previous_status: IncidentStatus | None = None,
+        source_dto: IncidentDto | IncidentDtoIn | None = None,
+        status_source: str | None = None,
+        status_changed_at: datetime | None = None,
+        status_changed_by: str | None = None,
+    ):
         if not incident:
             raise HTTPException(status_code=404, detail="Incident not found")
 
         new_incident_dto = IncidentDto.from_db_incident(incident)
+        self._apply_context_overrides(
+            new_incident_dto,
+            source_dto=source_dto,
+            previous_status=previous_status,
+            status_source=status_source,
+            status_changed_at=status_changed_at,
+            status_changed_by=status_changed_by,
+        )
 
         self.update_client_on_incident_change(incident.id)
         self.logger.info(
@@ -391,6 +433,45 @@ class IncidentBl:
             extra={"incident_id": incident.id},
         )
         return new_incident_dto
+
+    @staticmethod
+    def _coerce_incident_status(value: IncidentStatus | str | None) -> IncidentStatus | None:
+        if value is None:
+            return None
+        if isinstance(value, IncidentStatus):
+            return value
+        try:
+            return IncidentStatus(value)
+        except ValueError:
+            return None
+
+    def _apply_context_overrides(
+        self,
+        incident_dto: IncidentDto,
+        source_dto: IncidentDto | IncidentDtoIn | None = None,
+        previous_status: IncidentStatus | None = None,
+        status_source: str | None = None,
+        status_changed_at: datetime | None = None,
+        status_changed_by: str | None = None,
+    ) -> None:
+        if source_dto is not None:
+            for attr in ("status_source", "status_changed_at", "status_changed_by"):
+                if hasattr(source_dto, attr):
+                    value = getattr(source_dto, attr)
+                    if value is not None:
+                        setattr(incident_dto, attr, value)
+
+        if previous_status is not None:
+            incident_dto.previous_status = self._coerce_incident_status(previous_status)
+        if incident_dto.previous_status is None and incident_dto.status is not None:
+            incident_dto.previous_status = self._coerce_incident_status(incident_dto.status)
+
+        if status_source is not None:
+            incident_dto.status_source = status_source
+        if status_changed_at is not None:
+            incident_dto.status_changed_at = status_changed_at
+        if status_changed_by is not None:
+            incident_dto.status_changed_by = status_changed_by
 
     @staticmethod
     def query_incidents(
@@ -453,12 +534,14 @@ class IncidentBl:
             should_resolve = True
 
         incident_id = incident.id
+        previous_status = self._coerce_incident_status(incident.status)
 
         if should_resolve:
             for attempt in range(max_retries):
                 try:
                     incident.status = IncidentStatus.RESOLVED.value
-                    incident.end_time = datetime.now(tz=timezone.utc)
+                    end_time = datetime.now(tz=timezone.utc)
+                    incident.end_time = end_time
                     self.session.add(incident)
                     self.session.commit()
                     
@@ -468,6 +551,13 @@ class IncidentBl:
                         extra={"incident_id": incident_id, "tenant_id": self.tenant_id},
                     )
                     incident_dto = IncidentDto.from_db_incident(incident)
+                    self._apply_context_overrides(
+                        incident_dto,
+                        previous_status=previous_status,
+                        status_source="keep_auto",
+                        status_changed_at=end_time,
+                        status_changed_by="system",
+                    )
                     self.send_workflow_event(incident_dto, "updated")
                     
                     # Update client
@@ -510,6 +600,7 @@ class IncidentBl:
         if not incident:
             raise HTTPException(status_code=404, detail="Incident not found")
 
+        previous_status = self._coerce_incident_status(incident.status)
         if new_status in [IncidentStatus.RESOLVED, IncidentStatus.ACKNOWLEDGED]:
             enrichments = {"status": new_status.value}
             fingerprints = [alert.fingerprint for alert in incident.alerts]
@@ -529,9 +620,9 @@ class IncidentBl:
                 dispose_on_new_alert=True,
             )
 
+        status_changed_at = datetime.now(tz=timezone.utc)
         if new_status == IncidentStatus.RESOLVED:
-            end_time = datetime.now(tz=timezone.utc)
-            incident.end_time = end_time
+            incident.end_time = status_changed_at
 
         if incident.assignee != change_by.email:
             incident.assignee = change_by.email
@@ -558,4 +649,10 @@ class IncidentBl:
         self.session.add(incident)
         self.session.commit()
 
-        return self.__postprocess_incident_change(incident)
+        return self.__postprocess_incident_change(
+            incident,
+            previous_status=previous_status,
+            status_source="keep",
+            status_changed_at=status_changed_at,
+            status_changed_by=change_by.email,
+        )
