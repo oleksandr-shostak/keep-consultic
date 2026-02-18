@@ -622,6 +622,8 @@ class SalesforceProvider(BaseIncidentProvider):
         if value is None or value == "":
             return None
         if isinstance(value, datetime.datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=datetime.timezone.utc)
             return value
         if isinstance(value, (int, float)):
             return datetime.datetime.fromtimestamp(float(value), tz=datetime.timezone.utc)
@@ -873,12 +875,34 @@ class SalesforceProvider(BaseIncidentProvider):
         upsert_payload = dict(payload or {})
         upsert_payload.pop("Keep_Incident_Id__c", None)
 
-        status_code, response = self._request(
-            "PATCH",
-            "sobjects/Case/Keep_Incident_Id__c/"
-            + urllib.parse.quote(str(keep_incident_id), safe=""),
-            json_payload=upsert_payload,
+        upsert_endpoint = "sobjects/Case/Keep_Incident_Id__c/" + urllib.parse.quote(
+            str(keep_incident_id), safe=""
         )
+        try:
+            status_code, response = self._request(
+                "PATCH",
+                upsert_endpoint,
+                json_payload=upsert_payload,
+            )
+        except Exception as e:
+            # Concurrent upserts can race on external-id creation and one caller may
+            # receive a duplicate external-id error even though the Case exists.
+            message = str(e or "").lower()
+            duplicate_keep_incident_error = (
+                "duplicate value found" in message and "keep_incident_id__c" in message
+            )
+            if duplicate_keep_incident_error:
+                for attempt in range(3):
+                    case = self._get_case_by_keep_incident_id(keep_incident_id)
+                    case_id = self._get_dict_value_case_insensitive(case or {}, "Id", "id")
+                    if case_id:
+                        if upsert_payload:
+                            self._update_case(str(case_id), upsert_payload)
+                        return str(case_id), False
+                    if attempt < 2:
+                        time.sleep(0.2 * (attempt + 1))
+            raise
+
         created = status_code == 201
         if isinstance(response, dict):
             response_case_id = response.get("id") or response.get("Id")
@@ -1404,6 +1428,7 @@ class SalesforceProvider(BaseIncidentProvider):
             raw_event, "keep_incident_id", "keepIncidentId"
         )
         keep_incident_uuid = SalesforceProvider._coerce_uuid(keep_incident_id_raw)
+        generated_incident_id = SalesforceProvider._get_incident_id(str(case_id))
 
         allow_external = True
         tenant_id = None
@@ -1418,7 +1443,8 @@ class SalesforceProvider(BaseIncidentProvider):
                 )
             )
 
-        if keep_incident_uuid and tenant_id and provider_instance:
+        get_incident_by_id = None
+        if tenant_id and provider_instance:
             try:
                 from keep.api.core.db import get_incident_by_id
             except Exception:
@@ -1427,6 +1453,7 @@ class SalesforceProvider(BaseIncidentProvider):
                 )
                 return []
 
+        if keep_incident_uuid and get_incident_by_id:
             keep_incident = get_incident_by_id(
                 tenant_id=tenant_id, incident_id=keep_incident_uuid
             )
@@ -1456,6 +1483,11 @@ class SalesforceProvider(BaseIncidentProvider):
                 )
                 if event_time and last_sync_time and event_time <= last_sync_time:
                     return []
+                fallback_last_seen = SalesforceProvider._parse_datetime(
+                    getattr(keep_incident, "last_seen_time", None)
+                )
+                if event_time and fallback_last_seen and event_time <= fallback_last_seen:
+                    return []
 
                 incident_dto = IncidentDto.from_db_incident(keep_incident)
                 incident_dto.status = keep_status
@@ -1463,6 +1495,7 @@ class SalesforceProvider(BaseIncidentProvider):
                 incident_dto.status_source = "salesforce"
                 if event_time:
                     incident_dto.status_changed_at = event_time
+                    incident_dto.last_seen_time = event_time
                 if actor_display:
                     incident_dto.status_changed_by = actor_display
                 if keep_status == IncidentStatus.RESOLVED:
@@ -1474,6 +1507,22 @@ class SalesforceProvider(BaseIncidentProvider):
 
         if not allow_external and not keep_incident_uuid:
             return []
+
+        if not keep_incident_uuid and tenant_id and get_incident_by_id:
+            existing_external_incident = get_incident_by_id(
+                tenant_id=tenant_id, incident_id=generated_incident_id
+            )
+            if existing_external_incident:
+                existing_status = str(getattr(existing_external_incident, "status", "") or "")
+                if existing_status == keep_status.value:
+                    return []
+                existing_event_time = SalesforceProvider._parse_datetime(
+                    getattr(existing_external_incident, "last_seen_time", None)
+                ) or SalesforceProvider._parse_datetime(
+                    getattr(existing_external_incident, "creation_time", None)
+                )
+                if event_time and existing_event_time and event_time <= existing_event_time:
+                    return []
 
         subject = SalesforceProvider._get_dict_value_case_insensitive(
             case, "Subject", "subject"
@@ -1492,14 +1541,11 @@ class SalesforceProvider(BaseIncidentProvider):
         if not created_time:
             created_time = event_time or datetime.datetime.now(tz=datetime.timezone.utc)
 
-        incident_id = (
-            keep_incident_uuid
-            if keep_incident_uuid
-            else SalesforceProvider._get_incident_id(str(case_id))
-        )
+        incident_id = keep_incident_uuid if keep_incident_uuid else generated_incident_id
         incident = IncidentDto(
             id=incident_id,
             creation_time=created_time,
+            last_seen_time=event_time,
             user_generated_name=f"SF-{subject}-{case_number or case_id}",
             user_summary=description,
             status=keep_status,
