@@ -220,7 +220,10 @@ class SalesforceProvider(BaseIncidentProvider):
         IncidentStatus.RESOLVED.value: "Closed",
     }
     DEFAULT_SF_TO_KEEP_STATUS_MAP = {
+        "firing": IncidentStatus.FIRING.value,
+        "triggered": IncidentStatus.FIRING.value,
         "new": IncidentStatus.FIRING.value,
+        "acknowledged": IncidentStatus.ACKNOWLEDGED.value,
         "working": IncidentStatus.ACKNOWLEDGED.value,
         "in progress": IncidentStatus.ACKNOWLEDGED.value,
         "in_progress": IncidentStatus.ACKNOWLEDGED.value,

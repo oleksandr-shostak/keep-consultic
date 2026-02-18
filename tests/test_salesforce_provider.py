@@ -288,6 +288,25 @@ def test_format_incident_external_case_creation(salesforce_provider):
     assert formatted._tenant_id == "tenant-1"
 
 
+def test_format_incident_acknowledged_status_mapping(salesforce_provider):
+    event = {
+        "event_type": "case.updated",
+        "occurred_at": "2026-02-18T09:00:00Z",
+        "case": {
+            "Id": "500ACKCASE01",
+            "CaseNumber": "00065433",
+            "Subject": "External customer escalation",
+            "Status": "acknowledged",
+            "Priority": "High",
+        },
+    }
+
+    formatted = SalesforceProvider._format_incident(event, salesforce_provider)
+
+    assert isinstance(formatted, IncidentDto)
+    assert formatted.status == IncidentStatus.ACKNOWLEDGED
+
+
 def test_format_incident_skips_external_creation_when_disabled(
     salesforce_provider_external_disabled,
 ):
