@@ -1,7 +1,7 @@
 workflow:
   id: salesforce-incident-auto-sync
   name: Salesforce Incident Auto Sync
-  description: Automatically sync Keep incidents to Salesforce Cases with upsert and reverse-sync loop guards.
+  description: Automatically sync Salesforce-related Keep incidents to Salesforce Cases.
   triggers:
     - type: incident
       events:
@@ -10,7 +10,7 @@ workflow:
 
   actions:
     - name: upsert-salesforce-case
-      if: "{{ incident.status.value }} == 'firing' or {{ incident.status.value }} == 'acknowledged' or {{ incident.status.value }} == 'resolved'"
+      if: "{{ incident.rule_id }} == 'd2c259ef-afcc-49a9-9f02-820ecbeb59af' and ({{ incident.status.value }} == 'firing' or {{ incident.status.value }} == 'acknowledged' or {{ incident.status.value }} == 'resolved') and {{ incident.status_source }} != 'salesforce'"
       provider:
         type: salesforce
         config: "{{ providers.salesforce }}"
@@ -24,7 +24,7 @@ workflow:
             Incident: {{ incident.name }}
             Status: {{ incident.status.value }}
             Severity: {{ incident.severity.value }}
-            Keep URL: {{ keep.incident_url(incident) }}
+            Keep URL: https://keep-zpz9.consultic.tech/incidents/{{ incident.id }}
             Created: {{ incident.creation_time }}
             Last Seen: {{ incident.last_seen_time }}
 
@@ -47,7 +47,7 @@ workflow:
               value: keep-salesforce-sync
 
     - name: log-salesforce-sync
-      if: "{{ actions.upsert-salesforce-case.results.case.id }} != ''"
+      if: "{{ actions.upsert-salesforce-case.results.case.id | default('') }} != ''"
       provider:
         type: console
         with:

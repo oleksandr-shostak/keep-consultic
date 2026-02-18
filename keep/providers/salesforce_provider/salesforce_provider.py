@@ -48,6 +48,46 @@ class SalesforceProviderAuthConfig:
             "sensitive": True,
         }
     )
+    use_oauth_client_credentials: bool = dataclasses.field(
+        default=False,
+        metadata={
+            "required": False,
+            "description": "Use OAuth client credentials flow to fetch Salesforce bearer token automatically",
+            "sensitive": False,
+        },
+    )
+    oauth_token_url: str = dataclasses.field(
+        default="",
+        metadata={
+            "required": False,
+            "description": "OAuth token URL for client credentials flow (defaults to <instance_url>/services/oauth2/token)",
+            "sensitive": False,
+        },
+    )
+    oauth_scope: str = dataclasses.field(
+        default="",
+        metadata={
+            "required": False,
+            "description": "Optional OAuth scope sent to token endpoint",
+            "sensitive": False,
+        },
+    )
+    oauth_audience: str = dataclasses.field(
+        default="",
+        metadata={
+            "required": False,
+            "description": "Optional OAuth audience sent to token endpoint",
+            "sensitive": False,
+        },
+    )
+    oauth_token_expiry_skew_seconds: int = dataclasses.field(
+        default=60,
+        metadata={
+            "required": False,
+            "description": "Seconds subtracted from token expiration to refresh before expiry",
+            "sensitive": False,
+        },
+    )
     api_version: str = dataclasses.field(
         default="v61.0",
         metadata={
@@ -267,6 +307,8 @@ class SalesforceProvider(BaseIncidentProvider):
         self, context_manager: ContextManager, provider_id: str, config: ProviderConfig
     ):
         super().__init__(context_manager, provider_id, config)
+        self._oauth_access_token: str | None = None
+        self._oauth_access_token_expires_at: float = 0.0
         self.base_api_url = (
             f"{self.authentication_config.instance_url.rstrip('/')}"
             f"/services/data/{self.authentication_config.api_version.strip('/')}"
@@ -352,9 +394,113 @@ class SalesforceProvider(BaseIncidentProvider):
             self.authentication_config.client_secret_header: self.authentication_config.client_secret,
         }
         headers.update(self._parse_dict_like(self.authentication_config.additional_headers))
+        if self._should_use_oauth_client_credentials():
+            if not any(str(header_name).lower() == "authorization" for header_name in headers):
+                headers["Authorization"] = (
+                    f"Bearer {self._get_oauth_access_token(force_refresh=False)}"
+                )
         if extra:
             headers.update(extra)
         return headers
+
+    def _should_use_oauth_client_credentials(self) -> bool:
+        if not self._is_truthy(
+            getattr(self.authentication_config, "use_oauth_client_credentials", False)
+        ):
+            return False
+        static_headers = self._parse_dict_like(
+            self.authentication_config.additional_headers
+        )
+        if any(str(header_name).lower() == "authorization" for header_name in static_headers):
+            return False
+        return True
+
+    def _get_oauth_token_url(self) -> str:
+        configured_url = str(
+            getattr(self.authentication_config, "oauth_token_url", "") or ""
+        ).strip()
+        if configured_url:
+            return configured_url
+        return f"{self.authentication_config.instance_url.rstrip('/')}/services/oauth2/token"
+
+    def _fetch_oauth_access_token(self) -> str:
+        token_url = self._get_oauth_token_url()
+        payload: dict[str, str] = {
+            "grant_type": "client_credentials",
+            "client_id": self.authentication_config.client_id,
+            "client_secret": self.authentication_config.client_secret,
+        }
+        oauth_scope = str(getattr(self.authentication_config, "oauth_scope", "") or "").strip()
+        if oauth_scope:
+            payload["scope"] = oauth_scope
+        oauth_audience = str(
+            getattr(self.authentication_config, "oauth_audience", "") or ""
+        ).strip()
+        if oauth_audience:
+            payload["audience"] = oauth_audience
+
+        response = requests.request(
+            method="POST",
+            url=token_url,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data=payload,
+            timeout=self.authentication_config.timeout_seconds,
+        )
+        if response.status_code >= 400:
+            raise Exception(
+                f"Failed to fetch Salesforce OAuth token: {self._extract_error_message(response)}"
+            )
+
+        try:
+            token_payload = response.json()
+        except Exception:
+            token_payload = {}
+
+        access_token = (
+            token_payload.get("access_token")
+            if isinstance(token_payload, dict)
+            else None
+        )
+        if not access_token:
+            raise Exception("Salesforce OAuth token response missing access_token")
+
+        expires_in_raw = (
+            token_payload.get("expires_in")
+            if isinstance(token_payload, dict)
+            else None
+        )
+        try:
+            expires_in = float(expires_in_raw) if expires_in_raw is not None else 900.0
+        except (TypeError, ValueError):
+            expires_in = 900.0
+        expires_in = max(60.0, expires_in)
+        skew_seconds = max(
+            int(
+                getattr(
+                    self.authentication_config, "oauth_token_expiry_skew_seconds", 60
+                )
+                or 60
+            ),
+            0,
+        )
+
+        self._oauth_access_token = str(access_token)
+        self._oauth_access_token_expires_at = time.time() + max(
+            0.0, expires_in - float(skew_seconds)
+        )
+        return self._oauth_access_token
+
+    def _get_oauth_access_token(self, force_refresh: bool = False) -> str:
+        if (
+            not force_refresh
+            and self._oauth_access_token
+            and time.time() < self._oauth_access_token_expires_at
+        ):
+            return self._oauth_access_token
+        return self._fetch_oauth_access_token()
 
     def _extract_error_message(self, response: requests.Response) -> str:
         try:
@@ -399,15 +545,33 @@ class SalesforceProvider(BaseIncidentProvider):
             0.1,
         )
         attempt = 0
+        retried_after_unauthorized = False
         while True:
+            request_headers = self._get_headers(extra_headers)
             response = requests.request(
                 method=method.upper(),
                 url=url,
-                headers=self._get_headers(extra_headers),
+                headers=request_headers,
                 params=params,
                 json=json_payload,
                 timeout=self.authentication_config.timeout_seconds,
             )
+            if (
+                response.status_code == 401
+                and self._should_use_oauth_client_credentials()
+                and not retried_after_unauthorized
+            ):
+                retried_after_unauthorized = True
+                self.logger.info(
+                    "Salesforce API returned 401, refreshing OAuth token and retrying once",
+                    extra={
+                        "provider_id": self.provider_id,
+                        "url": url,
+                    },
+                )
+                self._get_oauth_access_token(force_refresh=True)
+                continue
+
             if allow_404 and response.status_code == 404:
                 return response.status_code, None
 
@@ -704,11 +868,16 @@ class SalesforceProvider(BaseIncidentProvider):
     def _upsert_case_by_keep_incident_id(
         self, keep_incident_id: str, payload: dict
     ) -> tuple[str, bool]:
+        # Salesforce external-id upsert endpoint already receives Keep_Incident_Id__c
+        # in the URL path and rejects the same field in request body.
+        upsert_payload = dict(payload or {})
+        upsert_payload.pop("Keep_Incident_Id__c", None)
+
         status_code, response = self._request(
             "PATCH",
             "sobjects/Case/Keep_Incident_Id__c/"
             + urllib.parse.quote(str(keep_incident_id), safe=""),
-            json_payload=payload,
+            json_payload=upsert_payload,
         )
         created = status_code == 201
         if isinstance(response, dict):
