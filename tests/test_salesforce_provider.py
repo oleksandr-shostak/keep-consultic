@@ -17,6 +17,7 @@ def _build_response(status_code: int, payload: dict | list | None = None) -> Mag
     response = MagicMock()
     response.status_code = status_code
     response.text = json.dumps(payload) if payload is not None else ""
+    response.headers = {}
     if payload is not None:
         response.json.return_value = payload
     else:
@@ -131,7 +132,7 @@ def test_notify_upsert_by_keep_incident_id(mock_request, salesforce_provider):
     assert first_call["headers"]["X-Client-Secret"] == "client-secret"
     assert first_call["json"]["Status"] == "Working"
     assert first_call["json"]["Priority"] == "High"
-    assert first_call["json"]["Keep_Incident_Id__c"] == keep_incident_id
+    assert "Keep_Incident_Id__c" not in first_call["json"]
     assert "Origin" not in first_call["json"]
 
 
@@ -502,3 +503,67 @@ def test_get_incidents_returns_only_status_changes(salesforce_provider):
     assert incidents[0].status == IncidentStatus.ACKNOWLEDGED
     assert incidents[0].status_source == "salesforce"
     assert isinstance(incidents[0].status_changed_at, datetime.datetime)
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_request_uses_oauth_client_credentials_bearer_header(mock_request):
+    context_manager = ContextManager(tenant_id="tenant-1", workflow_id="wf-1")
+    config = ProviderConfig(
+        authentication={
+            "instance_url": "https://consultic.my.salesforce.com",
+            "client_id": "oauth-client-id",
+            "client_secret": "oauth-client-secret",
+            "use_oauth_client_credentials": True,
+            "oauth_token_url": "https://login.salesforce.com/services/oauth2/token",
+        }
+    )
+    provider = SalesforceProvider(context_manager, "salesforce-test", config)
+
+    mock_request.side_effect = [
+        _build_response(200, {"access_token": "token-123", "expires_in": 1200}),
+        _build_response(200, {"records": [], "totalSize": 0, "done": True}),
+    ]
+
+    result = provider._query(limit=1)
+    assert result["total_size"] == 0
+
+    token_call = mock_request.call_args_list[0].kwargs
+    assert token_call["method"] == "POST"
+    assert token_call["url"] == "https://login.salesforce.com/services/oauth2/token"
+    assert token_call["data"]["grant_type"] == "client_credentials"
+    assert token_call["data"]["client_id"] == "oauth-client-id"
+    assert token_call["data"]["client_secret"] == "oauth-client-secret"
+
+    api_call = mock_request.call_args_list[1].kwargs
+    assert api_call["headers"]["Authorization"] == "Bearer token-123"
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_request_refreshes_oauth_token_on_401(mock_request):
+    context_manager = ContextManager(tenant_id="tenant-1", workflow_id="wf-1")
+    config = ProviderConfig(
+        authentication={
+            "instance_url": "https://consultic.my.salesforce.com",
+            "client_id": "oauth-client-id",
+            "client_secret": "oauth-client-secret",
+            "use_oauth_client_credentials": True,
+            "oauth_token_url": "https://login.salesforce.com/services/oauth2/token",
+        }
+    )
+    provider = SalesforceProvider(context_manager, "salesforce-test", config)
+
+    mock_request.side_effect = [
+        _build_response(200, {"access_token": "token-old", "expires_in": 1200}),
+        _build_response(401, [{"message": "Session expired", "errorCode": "INVALID_SESSION_ID"}]),
+        _build_response(200, {"access_token": "token-new", "expires_in": 1200}),
+        _build_response(200, {"records": [], "totalSize": 0, "done": True}),
+    ]
+
+    result = provider._query(limit=1)
+    assert result["total_size"] == 0
+    assert mock_request.call_count == 4
+
+    first_api_call = mock_request.call_args_list[1].kwargs
+    second_api_call = mock_request.call_args_list[3].kwargs
+    assert first_api_call["headers"]["Authorization"] == "Bearer token-old"
+    assert second_api_call["headers"]["Authorization"] == "Bearer token-new"
