@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 import typing
 import urllib.parse
 import uuid
@@ -76,6 +77,22 @@ class SalesforceProviderAuthConfig:
         metadata={
             "required": False,
             "description": "HTTP timeout for Salesforce requests",
+            "sensitive": False,
+        },
+    )
+    retry_max_attempts: int = dataclasses.field(
+        default=2,
+        metadata={
+            "required": False,
+            "description": "Number of retries for transient HTTP errors (429/5xx)",
+            "sensitive": False,
+        },
+    )
+    retry_backoff_seconds: float = dataclasses.field(
+        default=0.5,
+        metadata={
+            "required": False,
+            "description": "Initial retry backoff seconds for transient HTTP errors",
             "sensitive": False,
         },
     )
@@ -371,29 +388,67 @@ class SalesforceProvider(BaseIncidentProvider):
             if path_or_url.startswith("http://") or path_or_url.startswith("https://")
             else f"{self.base_api_url}/{path_or_url.lstrip('/')}"
         )
-        response = requests.request(
-            method=method.upper(),
-            url=url,
-            headers=self._get_headers(extra_headers),
-            params=params,
-            json=json_payload,
-            timeout=self.authentication_config.timeout_seconds,
+        retry_max_attempts = max(
+            int(getattr(self.authentication_config, "retry_max_attempts", 0) or 0), 0
         )
-        if allow_404 and response.status_code == 404:
-            return response.status_code, None
-        try:
-            response.raise_for_status()
-        except Exception as e:
-            raise Exception(self._extract_error_message(response)) from e
+        retry_backoff_seconds = max(
+            float(getattr(self.authentication_config, "retry_backoff_seconds", 0.5) or 0.5),
+            0.1,
+        )
+        attempt = 0
+        while True:
+            response = requests.request(
+                method=method.upper(),
+                url=url,
+                headers=self._get_headers(extra_headers),
+                params=params,
+                json=json_payload,
+                timeout=self.authentication_config.timeout_seconds,
+            )
+            if allow_404 and response.status_code == 404:
+                return response.status_code, None
 
-        if response.status_code == 204 or not response.text:
-            return response.status_code, {}
+            should_retry = response.status_code == 429 or 500 <= response.status_code < 600
+            if should_retry and attempt < retry_max_attempts:
+                retry_after_header = (response.headers or {}).get("Retry-After")
+                retry_delay = None
+                if retry_after_header:
+                    try:
+                        retry_delay = float(retry_after_header)
+                    except (TypeError, ValueError):
+                        retry_delay = None
+                if retry_delay is None:
+                    retry_delay = retry_backoff_seconds * (2**attempt)
+                retry_delay = min(max(retry_delay, 0.1), 60.0)
+                self.logger.warning(
+                    "Salesforce API transient error, retrying request",
+                    extra={
+                        "provider_id": self.provider_id,
+                        "url": url,
+                        "method": method.upper(),
+                        "status_code": response.status_code,
+                        "attempt": attempt + 1,
+                        "max_attempts": retry_max_attempts,
+                        "retry_delay_seconds": retry_delay,
+                    },
+                )
+                attempt += 1
+                time.sleep(retry_delay)
+                continue
 
-        try:
-            payload = response.json()
-        except Exception:
-            payload = {"raw": response.text}
-        return response.status_code, payload
+            try:
+                response.raise_for_status()
+            except Exception as e:
+                raise Exception(self._extract_error_message(response)) from e
+
+            if response.status_code == 204 or not response.text:
+                return response.status_code, {}
+
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {"raw": response.text}
+            return response.status_code, payload
 
     @staticmethod
     def _parse_datetime(value: typing.Any) -> datetime.datetime | None:
@@ -577,9 +632,8 @@ class SalesforceProvider(BaseIncidentProvider):
         if priority:
             payload["Priority"] = self._map_keep_priority_to_salesforce(str(priority))
 
-        resolved_origin = origin or self.authentication_config.default_origin
-        if resolved_origin:
-            payload["Origin"] = resolved_origin
+        if origin:
+            payload["Origin"] = origin
 
         resolved_owner = owner_id or self.authentication_config.default_owner_id
         if resolved_owner:
@@ -680,6 +734,17 @@ class SalesforceProvider(BaseIncidentProvider):
         if not isinstance(payload, dict):
             return {"records": [], "totalSize": 0, "done": True}
         return payload
+
+    def _format_soql_results(self, soql: str, payload: dict | None) -> dict:
+        payload = payload if isinstance(payload, dict) else {}
+        records = payload.get("records", [])
+        records = records if isinstance(records, list) else []
+        return {
+            "cases": [self._normalize_case_result(record) for record in records],
+            "total_size": payload.get("totalSize", len(records)),
+            "done": payload.get("done", True),
+            "soql": soql,
+        }
 
     def _coerce_fields_for_query(self, fields: list[str] | str | None) -> list[str]:
         if fields is None:
@@ -805,6 +870,13 @@ class SalesforceProvider(BaseIncidentProvider):
                 description = str(body)
 
         parsed_fields = self._parse_dict_like(fields)
+        mode_normalized = str(mode or "upsert").strip().lower()
+        if mode_normalized not in {"upsert", "create", "update"}:
+            raise Exception(f"Unknown Salesforce notify mode: {mode}")
+        resolved_origin = origin
+        # Avoid overriding existing Case Origin on update/upsert unless explicitly provided.
+        if not resolved_origin and mode_normalized == "create":
+            resolved_origin = self.authentication_config.default_origin
         resolved_status = (
             status
             if status not in (None, "")
@@ -822,7 +894,7 @@ class SalesforceProvider(BaseIncidentProvider):
             keep_incident_id=keep_incident_id,
             status=self._to_text_value(resolved_status),
             priority=self._to_text_value(resolved_priority),
-            origin=origin,
+            origin=resolved_origin,
             owner_id=owner_id,
             record_type_id=record_type_id,
             case_type=case_type,
@@ -832,7 +904,6 @@ class SalesforceProvider(BaseIncidentProvider):
         if not payload and mode in {"create", "update", "upsert"}:
             raise Exception("Salesforce notify payload is empty")
 
-        mode_normalized = str(mode or "upsert").strip().lower()
         existing = False
         action = mode_normalized
         created = False
@@ -907,17 +978,7 @@ class SalesforceProvider(BaseIncidentProvider):
 
         if soql:
             payload = self._query_soql(soql)
-            records = payload.get("records", []) if isinstance(payload, dict) else []
-            return {
-                "cases": [self._normalize_case_result(record) for record in records],
-                "total_size": payload.get("totalSize", len(records))
-                if isinstance(payload, dict)
-                else len(records),
-                "done": payload.get("done", True)
-                if isinstance(payload, dict)
-                else True,
-                "soql": soql,
-            }
+            return self._format_soql_results(soql, payload)
 
         selected_fields = self._coerce_fields_for_query(fields)
         safe_limit = max(min(int(limit), 2000), 1)
@@ -928,7 +989,7 @@ class SalesforceProvider(BaseIncidentProvider):
             "ORDER BY LastModifiedDate DESC "
             f"LIMIT {safe_limit}"
         )
-        return self._query(soql=soql)
+        return self._format_soql_results(soql, self._query_soql(soql))
 
     def _get_linked_cases_raw(self, limit: int = 200) -> list[dict]:
         query_fields = [
@@ -1041,7 +1102,13 @@ class SalesforceProvider(BaseIncidentProvider):
                 return payload.get("case")
             if isinstance(payload.get("Case"), dict):
                 return payload.get("Case")
-        if SalesforceProvider._get_dict_value_case_insensitive(raw_event, "Id", "Status"):
+        raw_case_id = SalesforceProvider._get_dict_value_case_insensitive(
+            raw_event, "Id", "id"
+        )
+        raw_case_status = SalesforceProvider._get_dict_value_case_insensitive(
+            raw_event, "Status", "status"
+        )
+        if raw_case_id not in (None, "") and raw_case_status not in (None, ""):
             return raw_event
         return None
 
@@ -1086,7 +1153,7 @@ class SalesforceProvider(BaseIncidentProvider):
         return tokens
 
     @staticmethod
-    def _get_status_map(provider_instance: "BaseProvider" = None) -> dict[str, str]:
+    def _get_status_map(provider_instance: BaseProvider | None = None) -> dict[str, str]:
         if provider_instance and hasattr(provider_instance, "salesforce_to_keep_status_map"):
             try:
                 mapping = getattr(provider_instance, "salesforce_to_keep_status_map")
@@ -1097,7 +1164,7 @@ class SalesforceProvider(BaseIncidentProvider):
         return SalesforceProvider.DEFAULT_SF_TO_KEEP_STATUS_MAP
 
     @staticmethod
-    def _get_priority_map(provider_instance: "BaseProvider" = None) -> dict[str, str]:
+    def _get_priority_map(provider_instance: BaseProvider | None = None) -> dict[str, str]:
         if provider_instance and hasattr(provider_instance, "salesforce_to_keep_priority_map"):
             try:
                 mapping = getattr(provider_instance, "salesforce_to_keep_priority_map")
@@ -1109,7 +1176,7 @@ class SalesforceProvider(BaseIncidentProvider):
 
     @staticmethod
     def _format_incident(
-        event: dict, provider_instance: "BaseProvider" = None
+        event: dict, provider_instance: BaseProvider | None = None
     ) -> IncidentDto | list[IncidentDto]:
         raw_event = event if isinstance(event, dict) else {}
         case = SalesforceProvider._extract_case_payload(raw_event)
@@ -1181,7 +1248,7 @@ class SalesforceProvider(BaseIncidentProvider):
 
         if keep_incident_uuid and tenant_id and provider_instance:
             try:
-                from keep.api.core.db import get_enrichment, get_incident_by_id
+                from keep.api.core.db import get_incident_by_id
             except Exception:
                 logger.exception(
                     "Salesforce incident webhook: failed importing DB helpers"
@@ -1196,16 +1263,9 @@ class SalesforceProvider(BaseIncidentProvider):
                 if keep_status_value == keep_status.value:
                     return []
 
-                sync_metadata = {}
-                try:
-                    enrichment = get_enrichment(tenant_id, str(keep_incident_uuid))
-                    if enrichment:
-                        sync_metadata = enrichment.enrichments or {}
-                except Exception:
-                    logger.exception(
-                        "Salesforce incident webhook: failed loading sync metadata",
-                        extra={"keep_incident_id": str(keep_incident_uuid)},
-                    )
+                sync_metadata = getattr(keep_incident, "enrichments", None) or {}
+                if not isinstance(sync_metadata, dict):
+                    sync_metadata = {}
 
                 sync_actor = sync_metadata.get("sf_sync_actor")
                 sync_actors = sync_metadata.get("sf_sync_actors")
@@ -1282,6 +1342,9 @@ class SalesforceProvider(BaseIncidentProvider):
             status_changed_at=event_time,
             status_changed_by=actor_display,
         )
+        if tenant_id:
+            incident._tenant_id = tenant_id
+        incident._alerts = []
         if keep_status == IncidentStatus.RESOLVED:
             incident.end_time = datetime.datetime.now(tz=datetime.timezone.utc)
         return incident

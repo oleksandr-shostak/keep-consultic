@@ -13,11 +13,11 @@ Design a production-safe Salesforce provider for Keep incidents, similar to Page
 ## Implementation Status (2026-02-18)
 
 - Provider implementation is in place at:
-  - `/Users/oleksandr.shostak/Desktop/github/keep-consultic/keep/providers/salesforce_provider/salesforce_provider.py`
+  - `keep/providers/salesforce_provider/salesforce_provider.py`
 - Workflow example for outbound Keep -> Salesforce sync:
-  - `/Users/oleksandr.shostak/Desktop/github/keep-consultic/examples/workflows/salesforce-incident-auto-sync.yml`
+  - `examples/workflows/salesforce-incident-auto-sync.yml`
 - Unit tests for provider behavior:
-  - `/Users/oleksandr.shostak/Desktop/github/keep-consultic/tests/test_salesforce_provider.py`
+  - `tests/test_salesforce_provider.py`
 
 
 ## Current Baseline In This Repository
@@ -29,17 +29,17 @@ Design a production-safe Salesforce provider for Keep incidents, similar to Page
   - `_get_incidents` pull-based status sync for linked incidents
   - `_format_incident` for Salesforce -> Keep webhook ingestion
   - `setup_incident_webhook` manual/optional auto-setup hook
-  - `/Users/oleksandr.shostak/Desktop/github/keep-consultic/keep/providers/salesforce_provider/salesforce_provider.py`
+  - `keep/providers/salesforce_provider/salesforce_provider.py`
 - PagerDuty remains the incident sync reference for behavior parity:
   - action/query contract via `_notify`/`_query`
   - incident webhook ingestion via `_format_incident` + `setup_incident_webhook`
   - periodic status pull via `_get_incidents`
   - anti-loop and stale update guards
-  - `/Users/oleksandr.shostak/Desktop/github/keep-consultic/keep/providers/pagerduty_provider/pagerduty_provider.py`
+  - `keep/providers/pagerduty_provider/pagerduty_provider.py`
 - Keep incident webhook pipeline for incident providers:
-  - `/Users/oleksandr.shostak/Desktop/github/keep-consultic/keep/api/routes/incidents.py`
+  - `keep/api/routes/incidents.py`
 - Provider webhook installation path (`/incidents/event/{provider_type}` for incident providers):
-  - `/Users/oleksandr.shostak/Desktop/github/keep-consultic/keep/providers/providers_service.py`
+  - `keep/providers/providers_service.py`
 
 
 ## Proposed Provider Shape

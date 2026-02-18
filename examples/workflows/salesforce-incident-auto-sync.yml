@@ -24,7 +24,7 @@ workflow:
             Incident: {{ incident.name }}
             Status: {{ incident.status.value }}
             Severity: {{ incident.severity.value }}
-            Keep URL: keep.incident_url(incident)
+            Keep URL: {{ keep.incident_url(incident) }}
             Created: {{ incident.creation_time }}
             Last Seen: {{ incident.last_seen_time }}
 
@@ -32,7 +32,6 @@ workflow:
             {{ incident.user_summary }}
           status: "{{ incident.status.value }}"
           priority: "{{ incident.severity.value }}"
-          origin: Keep
           enrich_incident:
             - key: salesforce_case_id
               value: results.case.id

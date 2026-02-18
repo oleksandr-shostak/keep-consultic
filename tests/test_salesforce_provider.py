@@ -29,6 +29,40 @@ def _build_response(status_code: int, payload: dict | list | None = None) -> Mag
     return response
 
 
+def _build_incident_dto(incident_id: uuid.UUID) -> IncidentDto:
+    return IncidentDto(
+        id=incident_id,
+        user_generated_name="Keep incident",
+        user_summary="Incident summary",
+        assignee=None,
+        same_incident_in_the_past_id=None,
+        severity=IncidentSeverity.HIGH,
+        start_time=None,
+        last_seen_time=None,
+        end_time=None,
+        creation_time=datetime.datetime.now(tz=datetime.timezone.utc),
+        alerts_count=0,
+        alert_sources=["keep"],
+        status=IncidentStatus.FIRING,
+        services=[],
+        is_predicted=False,
+        is_candidate=False,
+        generated_summary=None,
+        ai_generated_name=None,
+        rule_fingerprint=None,
+        fingerprint=str(incident_id),
+        merged_into_incident_id=None,
+        merged_by=None,
+        merged_at=None,
+        incident_type=None,
+        incident_application=None,
+        resolve_on="all",
+        rule_id=None,
+        rule_name=None,
+        rule_is_deleted=None,
+    )
+
+
 @pytest.fixture
 def salesforce_provider():
     context_manager = ContextManager(tenant_id="tenant-1", workflow_id="wf-1")
@@ -98,6 +132,7 @@ def test_notify_upsert_by_keep_incident_id(mock_request, salesforce_provider):
     assert first_call["json"]["Status"] == "Working"
     assert first_call["json"]["Priority"] == "High"
     assert first_call["json"]["Keep_Incident_Id__c"] == keep_incident_id
+    assert "Origin" not in first_call["json"]
 
 
 @patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
@@ -130,6 +165,64 @@ def test_notify_uses_enum_values_from_incident_context(
     first_call_payload = mock_request.call_args_list[0].kwargs["json"]
     assert first_call_payload["Status"] == "Closed"
     assert first_call_payload["Priority"] == "High"
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_notify_create_mode_creates_case(mock_request, salesforce_provider):
+    case_payload = {
+        "Id": "500CREATE001",
+        "CaseNumber": "00077777",
+        "Status": "New",
+        "Priority": "High",
+    }
+    mock_request.side_effect = [
+        _build_response(201, {"id": "500CREATE001"}),
+        _build_response(200, case_payload),
+    ]
+
+    result = salesforce_provider._notify(
+        mode="create",
+        subject="Created from Keep",
+        description="create mode",
+        status=IncidentStatus.FIRING.value,
+        priority=IncidentSeverity.CRITICAL.value,
+    )
+
+    assert result["created"] is True
+    assert result["existing"] is False
+    assert result["case"]["id"] == "500CREATE001"
+    first_call = mock_request.call_args_list[0].kwargs
+    assert first_call["method"] == "POST"
+    assert first_call["url"].endswith("/sobjects/Case")
+    assert first_call["json"]["Origin"] == "Keep"
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_notify_update_mode_updates_case(mock_request, salesforce_provider):
+    case_payload = {
+        "Id": "500UPDATE001",
+        "CaseNumber": "00088888",
+        "Status": "Closed",
+        "Priority": "Medium",
+    }
+    mock_request.side_effect = [
+        _build_response(204),
+        _build_response(200, case_payload),
+    ]
+
+    result = salesforce_provider._notify(
+        mode="update",
+        case_id="500UPDATE001",
+        status=IncidentStatus.RESOLVED.value,
+        priority=IncidentSeverity.WARNING.value,
+    )
+
+    assert result["created"] is False
+    assert result["existing"] is True
+    assert result["case"]["id"] == "500UPDATE001"
+    first_call = mock_request.call_args_list[0].kwargs
+    assert first_call["method"] == "PATCH"
+    assert first_call["url"].endswith("/sobjects/Case/500UPDATE001")
 
 
 @patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
@@ -192,6 +285,7 @@ def test_format_incident_external_case_creation(salesforce_provider):
     assert formatted.fingerprint == "500EXTERNALCASE01"
     assert formatted.status_source == "salesforce"
     assert formatted.status_changed_by == "agent@example.com"
+    assert formatted._tenant_id == "tenant-1"
 
 
 def test_format_incident_skips_external_creation_when_disabled(
@@ -227,8 +321,126 @@ def test_format_incident_skips_linked_case_when_status_unchanged(salesforce_prov
     with patch("keep.api.core.db.get_incident_by_id") as mock_get_incident:
         mock_get_incident.return_value = SimpleNamespace(status="resolved")
         formatted = SalesforceProvider._format_incident(event, salesforce_provider)
+        mock_get_incident.assert_called_once()
 
     assert formatted == []
+
+
+def test_format_incident_skips_when_actor_matches_sync_metadata(salesforce_provider):
+    keep_incident_id = str(uuid.uuid4())
+    event = {
+        "occurred_at": "2026-02-18T09:00:00Z",
+        "case": {
+            "Id": "500SYNCLOOP01",
+            "Status": "Working",
+            "Priority": "High",
+            "KeepIncidentId": keep_incident_id,
+        },
+        "actor": {
+            "Email": "keep-salesforce-sync@example.com",
+            "Name": "Keep Salesforce Sync",
+        },
+    }
+    keep_incident = SimpleNamespace(
+        status="firing",
+        enrichments={"sf_sync_actor": "keep-salesforce-sync@example.com"},
+    )
+
+    with patch("keep.api.core.db.get_incident_by_id") as mock_get_incident:
+        mock_get_incident.return_value = keep_incident
+        formatted = SalesforceProvider._format_incident(event, salesforce_provider)
+        mock_get_incident.assert_called_once()
+
+    assert formatted == []
+
+
+def test_format_incident_skips_stale_event_based_on_sync_timestamp(salesforce_provider):
+    keep_incident_id = str(uuid.uuid4())
+    event = {
+        "occurred_at": "2026-02-18T09:00:00Z",
+        "case": {
+            "Id": "500STALEEVENT01",
+            "Status": "Working",
+            "Priority": "High",
+            "KeepIncidentId": keep_incident_id,
+        },
+    }
+    keep_incident = SimpleNamespace(
+        status="firing",
+        enrichments={"sf_last_sync_at": "2026-02-18T09:30:00Z"},
+    )
+
+    with patch("keep.api.core.db.get_incident_by_id") as mock_get_incident:
+        mock_get_incident.return_value = keep_incident
+        formatted = SalesforceProvider._format_incident(event, salesforce_provider)
+        mock_get_incident.assert_called_once()
+
+    assert formatted == []
+
+
+def test_format_incident_ignores_non_case_payload_with_only_event_id(salesforce_provider):
+    event = {"Id": "evt-123", "event_type": "case.updated"}
+    formatted = SalesforceProvider._format_incident(event, salesforce_provider)
+    assert formatted == []
+
+
+def test_setup_incident_webhook_manual_returns_none(salesforce_provider):
+    result = salesforce_provider.setup_incident_webhook(
+        tenant_id="tenant-1",
+        keep_api_url="https://api.keep.example/incidents/event/salesforce?provider_id=salesforce-test",
+        api_key="webhook-key",
+        setup_alerts=True,
+    )
+    assert result is None
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_setup_incident_webhook_auto_setup(mock_request):
+    context_manager = ContextManager(tenant_id="tenant-1", workflow_id="wf-1")
+    config = ProviderConfig(
+        authentication={
+            "instance_url": "https://consultic.my.salesforce.com",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "webhook_setup_url": "https://consultic.my.salesforce.com/setup/webhook",
+        }
+    )
+    provider = SalesforceProvider(context_manager, "salesforce-test", config)
+    mock_request.return_value = _build_response(200, {"ok": True})
+
+    result = provider.setup_incident_webhook(
+        tenant_id="tenant-1",
+        keep_api_url="https://api.keep.example/incidents/event/salesforce?provider_id=salesforce-test",
+        api_key="webhook-key",
+        setup_alerts=True,
+    )
+
+    assert result is None
+    first_call = mock_request.call_args.kwargs
+    assert first_call["method"] == "POST"
+    assert first_call["url"] == "https://consultic.my.salesforce.com/setup/webhook"
+    assert first_call["json"]["keep_webhook_api_key"] == "webhook-key"
+    assert first_call["json"]["provider_id"] == "salesforce-test"
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_validate_scopes_success(mock_request, salesforce_provider):
+    mock_request.side_effect = [
+        _build_response(
+            200,
+            {
+                "records": [{"Id": "500SCOPE001"}],
+                "totalSize": 1,
+                "done": True,
+            },
+        ),
+        _build_response(200, {"name": "Case"}),
+    ]
+
+    scopes = salesforce_provider.validate_scopes()
+
+    assert scopes["case_read"] is True
+    assert scopes["case_write"] is True
 
 
 def test_get_incidents_returns_only_status_changes(salesforce_provider):
@@ -254,14 +466,6 @@ def test_get_incidents_returns_only_status_changes(salesforce_provider):
     changed_incident = SimpleNamespace(id=changed_incident_id, status="firing")
     unchanged_incident = SimpleNamespace(id=unchanged_incident_id, status="resolved")
 
-    dto_template = SimpleNamespace(
-        status=IncidentStatus.FIRING,
-        _alerts=[],
-        status_source=None,
-        status_changed_at=None,
-        end_time=None,
-    )
-
     with patch.object(
         salesforce_provider, "_get_linked_cases_raw", return_value=raw_cases
     ), patch("keep.api.core.db.get_incident_by_id") as mock_get_incident, patch.object(
@@ -269,8 +473,8 @@ def test_get_incidents_returns_only_status_changes(salesforce_provider):
     ) as mock_from_db_incident:
         mock_get_incident.side_effect = [changed_incident, unchanged_incident]
         mock_from_db_incident.side_effect = [
-            SimpleNamespace(**dto_template.__dict__),
-            SimpleNamespace(**dto_template.__dict__),
+            _build_incident_dto(changed_incident_id),
+            _build_incident_dto(unchanged_incident_id),
         ]
 
         incidents = salesforce_provider._get_incidents()
