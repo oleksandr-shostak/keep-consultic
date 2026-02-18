@@ -67,7 +67,6 @@ def _build_incident_dto(incident_id: uuid.UUID) -> IncidentDto:
 @pytest.fixture
 def salesforce_provider():
     context_manager = ContextManager(tenant_id="tenant-1", workflow_id="wf-1")
-    context_manager.api_url = "https://api.keep.example"
     config = ProviderConfig(
         authentication={
             "instance_url": "https://consultic.my.salesforce.com",
@@ -134,6 +133,58 @@ def test_notify_upsert_by_keep_incident_id(mock_request, salesforce_provider):
     assert first_call["json"]["Priority"] == "High"
     assert "Keep_Incident_Id__c" not in first_call["json"]
     assert "Origin" not in first_call["json"]
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_notify_upsert_duplicate_external_id_falls_back_to_get_and_update(
+    mock_request, salesforce_provider
+):
+    keep_incident_id = str(uuid.uuid4())
+    case_payload = {
+        "Id": "500RACECASE01",
+        "CaseNumber": "00099901",
+        "Status": "Working",
+        "Priority": "High",
+        "Keep_Incident_Id__c": keep_incident_id,
+    }
+    mock_request.side_effect = [
+        _build_response(
+            400,
+            [
+                {
+                    "message": "duplicate value found: Keep_Incident_Id__c duplicates value on record with id: 500RACECASE01",
+                    "errorCode": "DUPLICATE_VALUE",
+                }
+            ],
+        ),
+        _build_response(200, case_payload),
+        _build_response(204),
+        _build_response(200, case_payload),
+    ]
+
+    result = salesforce_provider._notify(
+        keep_incident_id=keep_incident_id,
+        subject="Race fallback test",
+        description="latest status should still be applied",
+        status=IncidentStatus.ACKNOWLEDGED.value,
+        priority=IncidentSeverity.HIGH.value,
+        mode="upsert",
+    )
+
+    assert result["action"] == "upsert"
+    assert result["created"] is False
+    assert result["existing"] is True
+    assert result["case"]["id"] == "500RACECASE01"
+
+    first_call = mock_request.call_args_list[0].kwargs
+    second_call = mock_request.call_args_list[1].kwargs
+    third_call = mock_request.call_args_list[2].kwargs
+    assert first_call["method"] == "PATCH"
+    assert "sobjects/Case/Keep_Incident_Id__c/" in first_call["url"]
+    assert second_call["method"] == "GET"
+    assert "sobjects/Case/Keep_Incident_Id__c/" in second_call["url"]
+    assert third_call["method"] == "PATCH"
+    assert third_call["url"].endswith("/sobjects/Case/500RACECASE01")
 
 
 @patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
@@ -388,6 +439,32 @@ def test_format_incident_skips_stale_event_based_on_sync_timestamp(salesforce_pr
     keep_incident = SimpleNamespace(
         status="firing",
         enrichments={"sf_last_sync_at": "2026-02-18T09:30:00Z"},
+    )
+
+    with patch("keep.api.core.db.get_incident_by_id") as mock_get_incident:
+        mock_get_incident.return_value = keep_incident
+        formatted = SalesforceProvider._format_incident(event, salesforce_provider)
+        mock_get_incident.assert_called_once()
+
+    assert formatted == []
+
+
+def test_format_incident_skips_stale_external_event_without_linked_keep_incident(
+    salesforce_provider,
+):
+    event = {
+        "occurred_at": "2026-02-18T09:00:00Z",
+        "case": {
+            "Id": "500EXTERNALSTALE01",
+            "Status": "firing",
+            "Priority": "High",
+            "Subject": "External stale test",
+        },
+    }
+    keep_incident = SimpleNamespace(
+        status="resolved",
+        last_seen_time=datetime.datetime(2026, 2, 18, 9, 30, tzinfo=datetime.timezone.utc),
+        creation_time=datetime.datetime(2026, 2, 18, 9, 0, tzinfo=datetime.timezone.utc),
     )
 
     with patch("keep.api.core.db.get_incident_by_id") as mock_get_incident:
