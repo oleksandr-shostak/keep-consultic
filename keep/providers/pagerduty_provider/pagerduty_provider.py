@@ -1517,6 +1517,96 @@ class PagerdutyProvider(
           - For update-intent calls (status/resolution), looks up the incident by key and updates it; never creates.
         - Else creates a new incident with a generated key.
         """
+        def _resolve_keep_incident_id_for_status_guard() -> str | None:
+            incident_context = getattr(self.context_manager, "incident_context", None)
+            context_incident_id = None
+            if isinstance(incident_context, dict):
+                context_incident_id = incident_context.get("id")
+            elif incident_context is not None:
+                context_incident_id = getattr(incident_context, "id", None)
+
+            if context_incident_id:
+                return str(context_incident_id)
+
+            if incident_key:
+                try:
+                    return str(uuid.UUID(str(incident_key)))
+                except Exception:
+                    return None
+            return None
+
+        def _guard_stale_keep_status_update(
+            pagerduty_incident_id: str = "",
+        ) -> dict | None:
+            requested_status = (str(status or "").strip().lower())
+            if requested_status not in {
+                IncidentStatus.ACKNOWLEDGED.value,
+                IncidentStatus.RESOLVED.value,
+            }:
+                return None
+
+            keep_incident_id = _resolve_keep_incident_id_for_status_guard()
+            if not keep_incident_id:
+                return None
+
+            try:
+                from keep.api.core.db import get_incident_by_id
+
+                keep_incident = get_incident_by_id(
+                    tenant_id=self.context_manager.tenant_id,
+                    incident_id=keep_incident_id,
+                )
+            except Exception:
+                self.logger.exception(
+                    "PagerDuty incident status guard: failed loading Keep incident",
+                    extra={
+                        "tenant_id": self.context_manager.tenant_id,
+                        "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                        "workflow_execution_id": getattr(
+                            self.context_manager, "workflow_execution_id", None
+                        ),
+                        "incident_key": incident_key,
+                        "incident_id": pagerduty_incident_id,
+                        "requested_status": requested_status,
+                        "keep_incident_id": keep_incident_id,
+                    },
+                )
+                return None
+
+            if not keep_incident:
+                return None
+
+            keep_current_status = str(getattr(keep_incident, "status", "") or "").lower()
+            if keep_current_status == requested_status:
+                return None
+
+            self.logger.info(
+                "PagerDuty incident update skipped: stale workflow status snapshot",
+                extra={
+                    "tenant_id": self.context_manager.tenant_id,
+                    "workflow_id": getattr(self.context_manager, "workflow_id", None),
+                    "workflow_execution_id": getattr(
+                        self.context_manager, "workflow_execution_id", None
+                    ),
+                    "incident_key": incident_key,
+                    "incident_id": pagerduty_incident_id,
+                    "requested_status": requested_status,
+                    "keep_incident_id": keep_incident_id,
+                    "keep_current_status": keep_current_status,
+                },
+            )
+
+            response = {
+                "skipped": True,
+                "reason": "stale_status_update",
+                "requested_status": requested_status,
+                "keep_incident_id": keep_incident_id,
+                "keep_current_status": keep_current_status,
+            }
+            if pagerduty_incident_id:
+                response["incident"] = {"id": pagerduty_incident_id}
+            return response
+
         if incident_id:
             self.logger.info(
                 "PagerDuty incident: updating by incident_id",
@@ -1532,6 +1622,11 @@ class PagerdutyProvider(
                     "has_resolution": bool(resolution),
                 },
             )
+            stale_skip = _guard_stale_keep_status_update(
+                pagerduty_incident_id=incident_id
+            )
+            if stale_skip is not None:
+                return stale_skip
             return self._update_incident(
                 incident_id=incident_id,
                 service_id=service_id,
@@ -1585,6 +1680,11 @@ class PagerdutyProvider(
                         raise Exception(
                             f"PagerDuty incident lookup by incident_key='{incident_key}' did not return an id"
                         )
+                    stale_skip = _guard_stale_keep_status_update(
+                        pagerduty_incident_id=existing_incident_id
+                    )
+                    if stale_skip is not None:
+                        return stale_skip
                     return self._update_incident(
                         incident_id=existing_incident_id,
                         service_id=service_id,

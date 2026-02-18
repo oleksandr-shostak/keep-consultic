@@ -225,7 +225,8 @@ class IncidentDto(IncidentDtoIn):
             incident_application=str(db_incident.incident_application),
             enrichments=db_incident.enrichments,
             resolve_on=db_incident.resolve_on,
-            rule_id=rule.id if rule else None,
+            # Keep workflow context needs rule_id even when rule object isn't eagerly loaded.
+            rule_id=rule.id if rule else db_incident.rule_id,
             rule_name=rule.name if rule else None,
             rule_is_deleted=rule.is_deleted if rule else None,
         )
