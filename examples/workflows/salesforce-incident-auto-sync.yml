@@ -1,0 +1,60 @@
+workflow:
+  id: salesforce-incident-auto-sync
+  name: Salesforce Incident Auto Sync
+  description: Automatically sync Keep incidents to Salesforce Cases with upsert and reverse-sync loop guards.
+  triggers:
+    - type: incident
+      events:
+        - created
+        - updated
+
+  actions:
+    - name: upsert-salesforce-case
+      if: "{{ incident.status.value }} == 'firing' or {{ incident.status.value }} == 'acknowledged' or {{ incident.status.value }} == 'resolved'"
+      provider:
+        type: salesforce
+        config: "{{ providers.salesforce }}"
+        with:
+          mode: upsert
+          keep_incident_id: "{{ incident.id }}"
+          subject: "{{ incident.name }}"
+          description: |
+            Keep incident synchronized to Salesforce.
+
+            Incident: {{ incident.name }}
+            Status: {{ incident.status.value }}
+            Severity: {{ incident.severity.value }}
+            Keep URL: keep.incident_url(incident)
+            Created: {{ incident.creation_time }}
+            Last Seen: {{ incident.last_seen_time }}
+
+            User Summary:
+            {{ incident.user_summary }}
+          status: "{{ incident.status.value }}"
+          priority: "{{ incident.severity.value }}"
+          origin: Keep
+          enrich_incident:
+            - key: salesforce_case_id
+              value: results.case.id
+            - key: salesforce_case_number
+              value: results.case.number
+            - key: salesforce_case_url
+              value: results.case.url
+            - key: sf_last_sync_status
+              value: "{{ incident.status.value }}"
+            - key: sf_last_sync_at
+              value: "{{ incident.last_seen_time }}"
+            - key: sf_sync_actor
+              value: keep-salesforce-sync
+
+    - name: log-salesforce-sync
+      if: "{{ actions.upsert-salesforce-case.results.case.id }} != ''"
+      provider:
+        type: console
+        with:
+          message: |
+            Salesforce case synced:
+            - Keep Incident ID: {{ incident.id }}
+            - Salesforce Case ID: {{ actions.upsert-salesforce-case.results.case.id }}
+            - Salesforce Case Number: {{ actions.upsert-salesforce-case.results.case.number }}
+            - Status: {{ incident.status.value }}
