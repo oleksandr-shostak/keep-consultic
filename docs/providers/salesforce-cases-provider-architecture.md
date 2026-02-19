@@ -213,6 +213,8 @@ Rules:
 - if no mapping and `allow_external_case_creation=true`:
   - create new Keep incident from case (fingerprint = Salesforce Case Id)
 
+`allow_external_case_creation` default: `false`.
+
 
 ## Contract 6: Pull Sync (`_get_incidents`)
 

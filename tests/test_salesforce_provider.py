@@ -91,6 +91,20 @@ def salesforce_provider_external_disabled():
     return SalesforceProvider(context_manager, "salesforce-test", config)
 
 
+@pytest.fixture
+def salesforce_provider_external_enabled():
+    context_manager = ContextManager(tenant_id="tenant-1", workflow_id="wf-1")
+    config = ProviderConfig(
+        authentication={
+            "instance_url": "https://consultic.my.salesforce.com",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "allow_external_case_creation": True,
+        }
+    )
+    return SalesforceProvider(context_manager, "salesforce-test", config)
+
+
 @patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
 def test_notify_upsert_by_keep_incident_id(mock_request, salesforce_provider):
     keep_incident_id = str(uuid.uuid4())
@@ -312,7 +326,7 @@ def test_query_default_linked_cases(mock_request, salesforce_provider):
     assert "LIMIT 1" in first_call["params"]["q"]
 
 
-def test_format_incident_external_case_creation(salesforce_provider):
+def test_format_incident_external_case_creation(salesforce_provider_external_enabled):
     event = {
         "event_type": "case.updated",
         "occurred_at": "2026-02-18T09:00:00Z",
@@ -329,7 +343,9 @@ def test_format_incident_external_case_creation(salesforce_provider):
         "actor": {"Email": "agent@example.com", "Name": "Agent One"},
     }
 
-    formatted = SalesforceProvider._format_incident(event, salesforce_provider)
+    formatted = SalesforceProvider._format_incident(
+        event, salesforce_provider_external_enabled
+    )
 
     assert isinstance(formatted, IncidentDto)
     assert formatted.status == IncidentStatus.RESOLVED
@@ -340,7 +356,9 @@ def test_format_incident_external_case_creation(salesforce_provider):
     assert formatted._tenant_id == "tenant-1"
 
 
-def test_format_incident_acknowledged_status_mapping(salesforce_provider):
+def test_format_incident_acknowledged_status_mapping(
+    salesforce_provider_external_enabled,
+):
     event = {
         "event_type": "case.updated",
         "occurred_at": "2026-02-18T09:00:00Z",
@@ -353,7 +371,9 @@ def test_format_incident_acknowledged_status_mapping(salesforce_provider):
         },
     }
 
-    formatted = SalesforceProvider._format_incident(event, salesforce_provider)
+    formatted = SalesforceProvider._format_incident(
+        event, salesforce_provider_external_enabled
+    )
 
     assert isinstance(formatted, IncidentDto)
     assert formatted.status == IncidentStatus.ACKNOWLEDGED
@@ -374,6 +394,20 @@ def test_format_incident_skips_external_creation_when_disabled(
     formatted = SalesforceProvider._format_incident(
         event, salesforce_provider_external_disabled
     )
+    assert formatted == []
+
+
+def test_format_incident_skips_external_creation_by_default(salesforce_provider):
+    event = {
+        "case": {
+            "Id": "500DEFAULTNOEXT01",
+            "Status": "New",
+            "Priority": "Low",
+            "Subject": "Do not import by default",
+        }
+    }
+
+    formatted = SalesforceProvider._format_incident(event, salesforce_provider)
     assert formatted == []
 
 
@@ -450,7 +484,7 @@ def test_format_incident_skips_stale_event_based_on_sync_timestamp(salesforce_pr
 
 
 def test_format_incident_skips_stale_external_event_without_linked_keep_incident(
-    salesforce_provider,
+    salesforce_provider_external_enabled,
 ):
     event = {
         "occurred_at": "2026-02-18T09:00:00Z",
@@ -469,7 +503,9 @@ def test_format_incident_skips_stale_external_event_without_linked_keep_incident
 
     with patch("keep.api.core.db.get_incident_by_id") as mock_get_incident:
         mock_get_incident.return_value = keep_incident
-        formatted = SalesforceProvider._format_incident(event, salesforce_provider)
+        formatted = SalesforceProvider._format_incident(
+            event, salesforce_provider_external_enabled
+        )
         mock_get_incident.assert_called_once()
 
     assert formatted == []
