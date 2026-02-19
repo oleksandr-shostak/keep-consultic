@@ -137,10 +137,10 @@ class SalesforceProviderAuthConfig:
         },
     )
     allow_external_case_creation: bool = dataclasses.field(
-        default=True,
+        default=False,
         metadata={
             "required": False,
-            "description": "Allow creating Keep incidents from external Salesforce cases",
+            "description": "Allow creating Keep incidents from external Salesforce cases (disabled by default)",
             "sensitive": False,
         },
     )
