@@ -208,12 +208,10 @@ Rules:
 
 - if `KeepIncidentId` exists and incident exists in Keep:
   - return `IncidentDto` with status change only (no alert ingestion)
-- if no mapping and `allow_external_case_creation=false`:
+- if `KeepIncidentId` is missing:
+  - return `[]` (no incident creation from external Salesforce cases)
+- if `KeepIncidentId` exists but incident is not found in Keep:
   - return `[]`
-- if no mapping and `allow_external_case_creation=true`:
-  - create new Keep incident from case (fingerprint = Salesforce Case Id)
-
-`allow_external_case_creation` default: `false`.
 
 
 ## Contract 6: Pull Sync (`_get_incidents`)
@@ -325,4 +323,4 @@ Retry policy:
 1. Confirm exact request auth format for static `client_id/client_secret` (header names or auth scheme).
 2. Can we add `Keep_Incident_Id__c` on Case as External ID (required for safe upsert)?
 3. Exact status values in your Salesforce org for "acknowledged/in-progress" and "resolved/closed"?
-4. Should external Salesforce cases be allowed to create new Keep incidents, or only sync linked ones?
+4. Keep only linked-case sync path (`KeepIncidentId` required); no external case import into Keep incidents.
