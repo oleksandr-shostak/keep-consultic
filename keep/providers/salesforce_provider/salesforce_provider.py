@@ -1,6 +1,5 @@
 import dataclasses
 import datetime
-import hashlib
 import json
 import logging
 import os
@@ -140,7 +139,7 @@ class SalesforceProviderAuthConfig:
         default=False,
         metadata={
             "required": False,
-            "description": "Allow creating Keep incidents from external Salesforce cases (disabled by default)",
+            "description": "Deprecated: external Salesforce case import to Keep incidents is disabled",
             "sensitive": False,
         },
     )
@@ -1279,12 +1278,6 @@ class SalesforceProvider(BaseIncidentProvider):
         return incidents
 
     @staticmethod
-    def _get_incident_id(case_id: str) -> uuid.UUID:
-        md5 = hashlib.md5()
-        md5.update(case_id.encode("utf-8"))
-        return uuid.UUID(md5.hexdigest())
-
-    @staticmethod
     def _extract_case_payload(raw_event: dict) -> dict | None:
         if not isinstance(raw_event, dict):
             return None
@@ -1428,20 +1421,14 @@ class SalesforceProvider(BaseIncidentProvider):
             raw_event, "keep_incident_id", "keepIncidentId"
         )
         keep_incident_uuid = SalesforceProvider._coerce_uuid(keep_incident_id_raw)
-        generated_incident_id = SalesforceProvider._get_incident_id(str(case_id))
-
-        allow_external = True
         tenant_id = None
         if provider_instance and hasattr(provider_instance, "context_manager"):
             tenant_id = getattr(provider_instance.context_manager, "tenant_id", None)
-        if provider_instance and hasattr(provider_instance, "authentication_config"):
-            allow_external = SalesforceProvider._is_truthy(
-                getattr(
-                    provider_instance.authentication_config,
-                    "allow_external_case_creation",
-                    True,
-                )
-            )
+
+        # Safety guard: Salesforce events without KeepIncidentId are always ignored.
+        # Keep incidents must be linked first by Keep->Salesforce sync workflow.
+        if not keep_incident_uuid:
+            return []
 
         get_incident_by_id = None
         if tenant_id and provider_instance:
@@ -1453,119 +1440,53 @@ class SalesforceProvider(BaseIncidentProvider):
                 )
                 return []
 
-        if keep_incident_uuid and get_incident_by_id:
-            keep_incident = get_incident_by_id(
-                tenant_id=tenant_id, incident_id=keep_incident_uuid
-            )
-            if keep_incident:
-                keep_status_value = str(getattr(keep_incident, "status", "") or "")
-                if keep_status_value == keep_status.value:
-                    return []
-
-                sync_metadata = getattr(keep_incident, "enrichments", None) or {}
-                if not isinstance(sync_metadata, dict):
-                    sync_metadata = {}
-
-                sync_actor = sync_metadata.get("sf_sync_actor")
-                sync_actors = sync_metadata.get("sf_sync_actors")
-                sync_tokens = SalesforceProvider._actor_tokens(
-                    [sync_actor]
-                    + (sync_actors if isinstance(sync_actors, list) else [sync_actors])
-                )
-                actor_tokens = SalesforceProvider._actor_tokens(
-                    [actor.get("email"), actor.get("name"), actor.get("id")]
-                )
-                if sync_tokens and actor_tokens and sync_tokens.intersection(actor_tokens):
-                    return []
-
-                last_sync_time = SalesforceProvider._parse_datetime(
-                    sync_metadata.get("sf_last_sync_at")
-                )
-                if event_time and last_sync_time and event_time <= last_sync_time:
-                    return []
-                fallback_last_seen = SalesforceProvider._parse_datetime(
-                    getattr(keep_incident, "last_seen_time", None)
-                )
-                if event_time and fallback_last_seen and event_time <= fallback_last_seen:
-                    return []
-
-                incident_dto = IncidentDto.from_db_incident(keep_incident)
-                incident_dto.status = keep_status
-                incident_dto._alerts = []
-                incident_dto.status_source = "salesforce"
-                if event_time:
-                    incident_dto.status_changed_at = event_time
-                    incident_dto.last_seen_time = event_time
-                if actor_display:
-                    incident_dto.status_changed_by = actor_display
-                if keep_status == IncidentStatus.RESOLVED:
-                    incident_dto.end_time = datetime.datetime.now(tz=datetime.timezone.utc)
-                return incident_dto
-
-            if not allow_external:
-                return []
-
-        if not allow_external and not keep_incident_uuid:
+        if not get_incident_by_id:
             return []
 
-        if not keep_incident_uuid and tenant_id and get_incident_by_id:
-            existing_external_incident = get_incident_by_id(
-                tenant_id=tenant_id, incident_id=generated_incident_id
-            )
-            if existing_external_incident:
-                existing_status = str(getattr(existing_external_incident, "status", "") or "")
-                if existing_status == keep_status.value:
-                    return []
-                existing_event_time = SalesforceProvider._parse_datetime(
-                    getattr(existing_external_incident, "last_seen_time", None)
-                ) or SalesforceProvider._parse_datetime(
-                    getattr(existing_external_incident, "creation_time", None)
-                )
-                if event_time and existing_event_time and event_time <= existing_event_time:
-                    return []
+        keep_incident = get_incident_by_id(tenant_id=tenant_id, incident_id=keep_incident_uuid)
+        if not keep_incident:
+            return []
 
-        subject = SalesforceProvider._get_dict_value_case_insensitive(
-            case, "Subject", "subject"
-        ) or "Salesforce Case"
-        description = SalesforceProvider._get_dict_value_case_insensitive(
-            case, "Description", "description"
-        )
-        case_number = SalesforceProvider._get_dict_value_case_insensitive(
-            case, "CaseNumber", "caseNumber"
-        )
-        created_time = SalesforceProvider._parse_datetime(
-            SalesforceProvider._get_dict_value_case_insensitive(
-                case, "CreatedDate", "createdDate"
-            )
-        )
-        if not created_time:
-            created_time = event_time or datetime.datetime.now(tz=datetime.timezone.utc)
+        keep_status_value = str(getattr(keep_incident, "status", "") or "")
+        if keep_status_value == keep_status.value:
+            return []
 
-        incident_id = keep_incident_uuid if keep_incident_uuid else generated_incident_id
-        incident = IncidentDto(
-            id=incident_id,
-            creation_time=created_time,
-            last_seen_time=event_time,
-            user_generated_name=f"SF-{subject}-{case_number or case_id}",
-            user_summary=description,
-            status=keep_status,
-            severity=keep_severity,
-            alert_sources=["salesforce"],
-            alerts_count=0,
-            services=["salesforce"],
-            is_predicted=False,
-            is_candidate=False,
-            fingerprint=str(case_id),
-            status_source="salesforce",
-            status_changed_at=event_time,
-            status_changed_by=actor_display,
+        sync_metadata = getattr(keep_incident, "enrichments", None) or {}
+        if not isinstance(sync_metadata, dict):
+            sync_metadata = {}
+
+        sync_actor = sync_metadata.get("sf_sync_actor")
+        sync_actors = sync_metadata.get("sf_sync_actors")
+        sync_tokens = SalesforceProvider._actor_tokens(
+            [sync_actor] + (sync_actors if isinstance(sync_actors, list) else [sync_actors])
         )
-        if tenant_id:
-            incident._tenant_id = tenant_id
-        incident._alerts = []
+        actor_tokens = SalesforceProvider._actor_tokens(
+            [actor.get("email"), actor.get("name"), actor.get("id")]
+        )
+        if sync_tokens and actor_tokens and sync_tokens.intersection(actor_tokens):
+            return []
+
+        last_sync_time = SalesforceProvider._parse_datetime(sync_metadata.get("sf_last_sync_at"))
+        if event_time and last_sync_time and event_time <= last_sync_time:
+            return []
+        fallback_last_seen = SalesforceProvider._parse_datetime(
+            getattr(keep_incident, "last_seen_time", None)
+        )
+        if event_time and fallback_last_seen and event_time <= fallback_last_seen:
+            return []
+
+        incident_dto = IncidentDto.from_db_incident(keep_incident)
+        incident_dto.status = keep_status
+        incident_dto._alerts = []
+        incident_dto.status_source = "salesforce"
+        if event_time:
+            incident_dto.status_changed_at = event_time
+            incident_dto.last_seen_time = event_time
+        if actor_display:
+            incident_dto.status_changed_by = actor_display
         if keep_status == IncidentStatus.RESOLVED:
-            incident.end_time = datetime.datetime.now(tz=datetime.timezone.utc)
-        return incident
+            incident_dto.end_time = datetime.datetime.now(tz=datetime.timezone.utc)
+        return incident_dto
 
     def dispose(self):
         pass
