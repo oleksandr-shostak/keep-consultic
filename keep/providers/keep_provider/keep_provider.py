@@ -201,6 +201,14 @@ class KeepProvider(BaseProvider):
             fingerprint=kwargs.get("fingerprint"),
             annotations=kwargs.get("annotations"),
             workflowId=self.context_manager.workflow_id,
+            # Keep provider-generated alerts must carry provider identity in the event payload.
+            # Correlation CEL rules often match on `providerId`.
+            providerId=kwargs.get("providerId")
+            or kwargs.get("provider_id")
+            or self.context_manager.workflow_id,
+            providerType=kwargs.get("providerType")
+            or kwargs.get("provider_type")
+            or "keep",
         )
         # to avoid multiple key word argument, add and key,val on alert data only if it doesn't exists:
         if isinstance(alert_data, dict):
