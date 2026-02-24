@@ -145,6 +145,7 @@ def test_notify_upsert_by_keep_incident_id(mock_request, salesforce_provider):
     assert first_call["headers"]["X-Client-Secret"] == "client-secret"
     assert first_call["json"]["Status"] == "Working"
     assert first_call["json"]["Priority"] == "High"
+    assert first_call["json"]["Canal_Source__c"] == "Keep"
     assert "Keep_Incident_Id__c" not in first_call["json"]
     assert "Origin" not in first_call["json"]
 
@@ -261,6 +262,37 @@ def test_notify_create_mode_creates_case(mock_request, salesforce_provider):
     assert first_call["method"] == "POST"
     assert first_call["url"].endswith("/sobjects/Case")
     assert first_call["json"]["Origin"] == "Keep"
+    assert first_call["json"]["Canal_Source__c"] == "Keep"
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_notify_create_mode_preserves_explicit_canal_source(mock_request, salesforce_provider):
+    mock_request.side_effect = [
+        _build_response(201, {"id": "500CREATE002"}),
+        _build_response(
+            200,
+            {
+                "Id": "500CREATE002",
+                "CaseNumber": "00077778",
+                "Status": "New",
+                "Priority": "Medium",
+                "Canal_Source__c": "Email",
+            },
+        ),
+    ]
+
+    salesforce_provider._notify(
+        mode="create",
+        subject="Created from Keep explicit source",
+        description="create mode explicit source",
+        status=IncidentStatus.FIRING.value,
+        priority=IncidentSeverity.WARNING.value,
+        fields={"Canal_Source__c": "Email"},
+    )
+
+    first_call = mock_request.call_args_list[0].kwargs
+    assert first_call["method"] == "POST"
+    assert first_call["json"]["Canal_Source__c"] == "Email"
 
 
 @patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
