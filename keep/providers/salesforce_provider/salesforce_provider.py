@@ -151,6 +151,14 @@ class SalesforceProviderAuthConfig:
             "sensitive": False,
         },
     )
+    default_canal_source: str = dataclasses.field(
+        default="Keep",
+        metadata={
+            "required": False,
+            "description": "Default Salesforce Case Canal_Source__c value for Keep-created cases",
+            "sensitive": False,
+        },
+    )
     default_owner_id: str = dataclasses.field(
         default="",
         metadata={
@@ -1068,6 +1076,17 @@ class SalesforceProvider(BaseIncidentProvider):
         mode_normalized = str(mode or "upsert").strip().lower()
         if mode_normalized not in {"upsert", "create", "update"}:
             raise Exception(f"Unknown Salesforce notify mode: {mode}")
+        if mode_normalized in {"create", "upsert"}:
+            default_canal_source = str(
+                self.authentication_config.default_canal_source or ""
+            ).strip()
+            has_canal_source = isinstance(parsed_fields, dict) and any(
+                str(field_name).lower() == "canal_source__c"
+                for field_name in parsed_fields
+            )
+            if default_canal_source and not has_canal_source:
+                parsed_fields = dict(parsed_fields or {})
+                parsed_fields["Canal_Source__c"] = default_canal_source
         resolved_origin = origin
         # Avoid overriding existing Case Origin on update/upsert unless explicitly provided.
         if not resolved_origin and mode_normalized == "create":
