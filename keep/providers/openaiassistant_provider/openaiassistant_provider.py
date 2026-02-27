@@ -13,6 +13,7 @@ Author: Keep
 
 import json
 import dataclasses
+import os
 import pydantic
 from typing import Optional, Dict, Any, List
 
@@ -55,6 +56,22 @@ class OpenaiassistantProviderAuthConfig:
         metadata={
             "required": False,
             "description": "OpenAI Platform Organization ID",
+            "sensitive": False,
+        },
+        default=None,
+    )
+    prompt_version: str | None = dataclasses.field(
+        metadata={
+            "required": False,
+            "description": "Optional prompt version to pin deterministic runs.",
+            "sensitive": False,
+        },
+        default=None,
+    )
+    vector_store_id: str | None = dataclasses.field(
+        metadata={
+            "required": False,
+            "description": "Optional vector store id for file search grounding.",
             "sensitive": False,
         },
         default=None,
@@ -184,7 +201,13 @@ class OpenaiassistantProvider(BaseProvider):
             }
 
             if self.authentication_config.prompt_id:
-                response_kwargs["prompt"] = {"id": self.authentication_config.prompt_id}
+                prompt_payload: Dict[str, Any] = {
+                    "id": self.authentication_config.prompt_id
+                }
+                prompt_version = self.authentication_config.prompt_version
+                if prompt_version:
+                    prompt_payload["version"] = str(prompt_version)
+                response_kwargs["prompt"] = prompt_payload
             else:
                 response_kwargs["model"] = kwargs.pop(
                     "model", self.authentication_config.model
@@ -198,6 +221,27 @@ class OpenaiassistantProvider(BaseProvider):
 
             # Allow callers to override defaults (e.g., temperature, tools...)
             response_kwargs.update(kwargs)
+
+            vector_store_id = self.authentication_config.vector_store_id
+            if vector_store_id:
+                file_search_tool = {
+                    "type": "file_search",
+                    "vector_store_ids": [vector_store_id],
+                }
+                existing_tools = response_kwargs.get("tools")
+                if not existing_tools:
+                    response_kwargs["tools"] = [file_search_tool]
+                else:
+                    has_file_search = any(
+                        tool.get("type") == "file_search"
+                        for tool in existing_tools
+                        if isinstance(tool, dict)
+                    )
+                    if not has_file_search:
+                        response_kwargs["tools"] = [
+                            *existing_tools,
+                            file_search_tool,
+                        ]
 
             # Ensure responses are persisted in OpenAI UI for inspection
             response_kwargs.setdefault("store", True)
@@ -334,4 +378,3 @@ if __name__ == "__main__":
         additional_instructions="Respond in JSON format with keys: severity, action, explanation"
     )
     print(f"Response: {result3['response']}")
-

@@ -1,5 +1,6 @@
 import base64
 import concurrent.futures
+import datetime
 import hashlib
 import hmac
 import json
@@ -9,14 +10,24 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from typing import List, Optional
+from uuid import UUID
 
 import celpy
 from arq import ArqRedis
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+)
 from fastapi.responses import JSONResponse
 from pusher import Pusher
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy_utils import UUIDType
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from keep.api.arq_pool import get_pool
 from keep.api.bl.enrichments_bl import EnrichmentsBl
@@ -34,6 +45,7 @@ from keep.api.core.db import dismiss_error_alert_by_id
 from keep.api.core.db import enrich_alerts_with_incidents
 from keep.api.core.db import get_alert_audit as get_alert_audit_db
 from keep.api.core.db import (
+    get_alert_by_event_id,
     get_alerts_by_fingerprint,
     get_alerts_by_ids,
     get_alerts_metrics_by_provider,
@@ -55,6 +67,10 @@ from keep.api.models.action_type import ActionType
 from keep.api.models.alert import (
     AlertDto,
     AlertErrorDto,
+    AlertSeverityProposalDeleteResponse,
+    AlertSeverityProposalRequest,
+    AlertSeverityProposalResponse,
+    AlertSeverityProposalSyncStatus,
     AlertStatus,
     BatchEnrichAlertRequestBody,
     DeleteRequestBody,
@@ -65,6 +81,10 @@ from keep.api.models.alert import (
 )
 from keep.api.models.alert_audit import AlertAuditDto
 from keep.api.models.db.incident import IncidentStatus
+from keep.api.models.db.alert_severity_proposal import (
+    AlertSeverityProposal,
+    AlertSeverityProposalStatus,
+)
 from keep.api.models.db.rule import ResolveOn
 from keep.api.models.facet import FacetOptionsQueryDto
 from keep.api.models.query import QueryDto
@@ -72,6 +92,10 @@ from keep.api.models.search_alert import SearchAlertsRequest
 from keep.api.models.time_stamp import TimeStampFilter
 from keep.api.routes.preset import pull_data_from_providers
 from keep.api.tasks.process_event_task import process_event
+from keep.api.tasks.sync_alert_severity_proposal_task import (
+    delete_alert_severity_proposal_from_vector_store,
+    sync_alert_severity_proposal_to_vector_store,
+)
 from keep.api.utils.email_utils import EmailTemplates, send_email
 from keep.api.utils.enrichment_helpers import convert_db_alerts_to_dto_alerts
 from keep.api.utils.time_stamp_helpers import get_time_stamp_filter
@@ -739,6 +763,414 @@ async def receive_event(
             running_tasks,
         )
     return JSONResponse(content={"task_name": task_name}, status_code=202)
+
+
+def _build_alert_severity_proposal_dedupe_hash(
+    tenant_id: str,
+    event_id: str,
+    proposed_severity: str,
+    reason: str,
+    created_by: str,
+) -> str:
+    payload = json.dumps(
+        {
+            "tenant_id": tenant_id,
+            "event_id": event_id,
+            "proposed_severity": proposed_severity,
+            "reason": reason.strip().lower(),
+            "created_by": created_by.strip().lower(),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _get_default_alert_proposal_vector_store_id() -> str | None:
+    for candidate in (
+        os.environ.get("KEEP_ALERT_PROPOSAL_VECTOR_STORE_ID"),
+        os.environ.get("OPENAI_INCIDENTS_TRIAGE_VECTOR_STORE_ID"),
+    ):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _get_active_alert_proposal(
+    session: Session, tenant_id: str, alert_id: UUID
+) -> AlertSeverityProposal | None:
+    return session.exec(
+        select(AlertSeverityProposal)
+        .where(AlertSeverityProposal.tenant_id == tenant_id)
+        .where(AlertSeverityProposal.alert_id == alert_id)
+        .where(AlertSeverityProposal.is_deleted.is_(False))
+        .order_by(AlertSeverityProposal.created_at.desc())
+    ).first()
+
+
+def _serialize_alert_severity_proposal(
+    proposal: AlertSeverityProposal, *, deduplicated: bool = False
+) -> AlertSeverityProposalResponse:
+    return AlertSeverityProposalResponse(
+        id=str(proposal.id),
+        alert_id=str(proposal.alert_id),
+        alert_fingerprint=proposal.alert_fingerprint,
+        current_severity=proposal.current_severity,
+        proposed_severity=proposal.proposed_severity,
+        reason=proposal.reason,
+        created_by=proposal.created_by,
+        created_at=proposal.created_at,
+        updated_by=proposal.updated_by,
+        updated_at=proposal.updated_at,
+        deleted_at=proposal.deleted_at,
+        sync_status=AlertSeverityProposalSyncStatus(proposal.sync_status),
+        sync_status_reason=proposal.sync_status_reason,
+        deduplicated=deduplicated,
+    )
+
+
+async def _enqueue_alert_severity_sync(
+    *,
+    proposal: AlertSeverityProposal,
+    tenant_id: str,
+    session: Session,
+    background_tasks: BackgroundTasks,
+):
+    if REDIS:
+        redis: ArqRedis = await get_pool()
+        job = await redis.enqueue_job(
+            "async_sync_alert_severity_proposal",
+            tenant_id,
+            str(proposal.id),
+            proposal.vector_store_id,
+            _queue_name=KEEP_ARQ_QUEUE_BASIC,
+        )
+        proposal.sync_status_reason = f"Queued for vector sync (job: {job.job_id})."
+        session.add(proposal)
+        session.commit()
+    else:
+        background_tasks.add_task(
+            sync_alert_severity_proposal_to_vector_store,
+            {},
+            tenant_id,
+            str(proposal.id),
+            proposal.vector_store_id,
+        )
+        proposal.sync_status_reason = "Queued for local vector sync."
+        session.add(proposal)
+        session.commit()
+
+
+async def _enqueue_alert_severity_delete_sync(
+    *,
+    proposal: AlertSeverityProposal,
+    tenant_id: str,
+    session: Session,
+    background_tasks: BackgroundTasks,
+):
+    if REDIS:
+        redis: ArqRedis = await get_pool()
+        job = await redis.enqueue_job(
+            "async_delete_alert_severity_proposal",
+            tenant_id,
+            str(proposal.id),
+            proposal.vector_store_id,
+            _queue_name=KEEP_ARQ_QUEUE_BASIC,
+        )
+        proposal.sync_status_reason = (
+            f"Queued for vector delete sync (job: {job.job_id})."
+        )
+        session.add(proposal)
+        session.commit()
+    else:
+        background_tasks.add_task(
+            delete_alert_severity_proposal_from_vector_store,
+            {},
+            tenant_id,
+            str(proposal.id),
+            proposal.vector_store_id,
+        )
+        proposal.sync_status_reason = "Queued for local vector delete sync."
+        session.add(proposal)
+        session.commit()
+
+
+@router.get(
+    "/event/{event_id}/propose-severity",
+    description="Get user proposed severity for an alert",
+    response_model=AlertSeverityProposalResponse,
+)
+def get_alert_severity_proposal(
+    event_id: str,
+    authenticated_entity: AuthenticatedEntity = Depends(
+        IdentityManagerFactory.get_auth_verifier(["read:alert"])
+    ),
+    session: Session = Depends(get_session),
+):
+    tenant_id = authenticated_entity.tenant_id
+    try:
+        alert = get_alert_by_event_id(
+            tenant_id=tenant_id, event_id=event_id, session=session
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid alert event id") from exc
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    proposal = _get_active_alert_proposal(session, tenant_id, alert.id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Severity proposal not found")
+
+    return _serialize_alert_severity_proposal(proposal)
+
+
+@router.post(
+    "/event/{event_id}/propose-severity",
+    description="Store user proposed severity for an alert and queue vector store sync",
+    response_model=AlertSeverityProposalResponse,
+)
+async def propose_alert_severity(
+    event_id: str,
+    payload: AlertSeverityProposalRequest,
+    background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    authenticated_entity: AuthenticatedEntity = Depends(
+        IdentityManagerFactory.get_auth_verifier(["write:alert"])
+    ),
+    session: Session = Depends(get_session),
+):
+    tenant_id = authenticated_entity.tenant_id
+    created_by = authenticated_entity.email or "unknown"
+    normalized_idempotency_key = idempotency_key.strip()[:255] if idempotency_key else None
+
+    try:
+        alert = get_alert_by_event_id(
+            tenant_id=tenant_id, event_id=event_id, session=session
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid alert event id") from exc
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    dedupe_hash = _build_alert_severity_proposal_dedupe_hash(
+        tenant_id=tenant_id,
+        event_id=event_id,
+        proposed_severity=payload.proposed_severity.value,
+        reason=payload.reason,
+        created_by=created_by,
+    )
+
+    existing_proposal = None
+    if normalized_idempotency_key:
+        existing_proposal = session.exec(
+            select(AlertSeverityProposal)
+            .where(AlertSeverityProposal.tenant_id == tenant_id)
+            .where(AlertSeverityProposal.idempotency_key == normalized_idempotency_key)
+            .where(AlertSeverityProposal.is_deleted.is_(False))
+        ).first()
+
+    if not existing_proposal:
+        existing_proposal = session.exec(
+            select(AlertSeverityProposal)
+            .where(AlertSeverityProposal.tenant_id == tenant_id)
+            .where(AlertSeverityProposal.dedupe_hash == dedupe_hash)
+            .where(AlertSeverityProposal.is_deleted.is_(False))
+        ).first()
+
+    deduplicated = existing_proposal is not None
+    proposal = existing_proposal
+    if not proposal:
+        alert_event = alert.event or {}
+        source = alert_event.get("source")
+        if source and not isinstance(source, list):
+            source = [str(source)]
+        elif isinstance(source, list):
+            source = [str(item) for item in source]
+        else:
+            source = []
+
+        proposal = AlertSeverityProposal(
+            tenant_id=tenant_id,
+            alert_id=alert.id,
+            alert_fingerprint=alert.fingerprint,
+            source=source,
+            provider_id=alert.provider_id or alert_event.get("providerId"),
+            provider_type=alert.provider_type or alert_event.get("providerType"),
+            current_severity=str(alert_event.get("severity", "info")).lower(),
+            proposed_severity=payload.proposed_severity.value,
+            reason=payload.reason,
+            alert_name=alert_event.get("name") or alert_event.get("alert_name") or alert.fingerprint,
+            alert_message=alert_event.get("message"),
+            alert_description=alert_event.get("description"),
+            created_by=created_by,
+            idempotency_key=normalized_idempotency_key,
+            dedupe_hash=dedupe_hash,
+            sync_status=AlertSeverityProposalStatus.PENDING.value,
+            sync_status_reason="Queued for vector sync.",
+            vector_store_id=_get_default_alert_proposal_vector_store_id(),
+        )
+        session.add(proposal)
+        try:
+            session.commit()
+            session.refresh(proposal)
+        except IntegrityError:
+            session.rollback()
+            proposal = session.exec(
+                select(AlertSeverityProposal)
+                .where(AlertSeverityProposal.tenant_id == tenant_id)
+                .where(AlertSeverityProposal.dedupe_hash == dedupe_hash)
+                .where(AlertSeverityProposal.is_deleted.is_(False))
+            ).first()
+            deduplicated = proposal is not None
+            if not proposal:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Failed to create severity proposal due to duplicate write",
+                )
+
+    should_enqueue_sync = (
+        not deduplicated
+        or proposal.sync_status == AlertSeverityProposalStatus.FAILED.value
+    )
+
+    if should_enqueue_sync:
+        proposal.sync_status = AlertSeverityProposalStatus.PENDING.value
+        proposal.sync_status_reason = "Queued for vector sync."
+        session.add(proposal)
+        session.commit()
+        await _enqueue_alert_severity_sync(
+            proposal=proposal,
+            tenant_id=tenant_id,
+            session=session,
+            background_tasks=background_tasks,
+        )
+
+    return _serialize_alert_severity_proposal(proposal, deduplicated=deduplicated)
+
+
+@router.put(
+    "/event/{event_id}/propose-severity",
+    description="Update user proposed severity for an alert and re-sync vector store entry",
+    response_model=AlertSeverityProposalResponse,
+)
+async def update_alert_severity_proposal(
+    event_id: str,
+    payload: AlertSeverityProposalRequest,
+    background_tasks: BackgroundTasks,
+    authenticated_entity: AuthenticatedEntity = Depends(
+        IdentityManagerFactory.get_auth_verifier(["write:alert"])
+    ),
+    session: Session = Depends(get_session),
+):
+    tenant_id = authenticated_entity.tenant_id
+    updated_by = authenticated_entity.email or "unknown"
+
+    try:
+        alert = get_alert_by_event_id(
+            tenant_id=tenant_id, event_id=event_id, session=session
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid alert event id") from exc
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    proposal = _get_active_alert_proposal(session, tenant_id, alert.id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Severity proposal not found")
+
+    dedupe_hash = _build_alert_severity_proposal_dedupe_hash(
+        tenant_id=tenant_id,
+        event_id=event_id,
+        proposed_severity=payload.proposed_severity.value,
+        reason=payload.reason,
+        created_by=proposal.created_by,
+    )
+
+    is_noop = (
+        proposal.proposed_severity == payload.proposed_severity.value
+        and proposal.reason.strip() == payload.reason.strip()
+    )
+    if is_noop:
+        return _serialize_alert_severity_proposal(proposal, deduplicated=True)
+
+    proposal.proposed_severity = payload.proposed_severity.value
+    proposal.reason = payload.reason
+    proposal.updated_by = updated_by
+    proposal.updated_at = datetime.datetime.now(tz=datetime.timezone.utc)
+    proposal.dedupe_hash = dedupe_hash
+    proposal.sync_status = AlertSeverityProposalStatus.PENDING.value
+    proposal.sync_status_reason = "Queued for vector sync."
+    session.add(proposal)
+    session.commit()
+    session.refresh(proposal)
+
+    await _enqueue_alert_severity_sync(
+        proposal=proposal,
+        tenant_id=tenant_id,
+        session=session,
+        background_tasks=background_tasks,
+    )
+
+    return _serialize_alert_severity_proposal(proposal)
+
+
+@router.delete(
+    "/event/{event_id}/propose-severity",
+    description="Delete user proposed severity for an alert and remove it from vector store",
+    response_model=AlertSeverityProposalDeleteResponse,
+)
+async def delete_alert_severity_proposal(
+    event_id: str,
+    background_tasks: BackgroundTasks,
+    authenticated_entity: AuthenticatedEntity = Depends(
+        IdentityManagerFactory.get_auth_verifier(["write:alert"])
+    ),
+    session: Session = Depends(get_session),
+):
+    tenant_id = authenticated_entity.tenant_id
+    deleted_by = authenticated_entity.email or "unknown"
+
+    try:
+        alert = get_alert_by_event_id(
+            tenant_id=tenant_id, event_id=event_id, session=session
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid alert event id") from exc
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    proposal = _get_active_alert_proposal(session, tenant_id, alert.id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Severity proposal not found")
+
+    proposal.is_deleted = True
+    proposal.deleted_by = deleted_by
+    proposal.deleted_at = datetime.datetime.now(tz=datetime.timezone.utc)
+    proposal.updated_by = deleted_by
+    proposal.updated_at = proposal.deleted_at
+    proposal.idempotency_key = None
+    proposal.dedupe_hash = (
+        f"{proposal.dedupe_hash}:deleted:{int(proposal.deleted_at.timestamp())}"
+    )[:255]
+    proposal.sync_status = AlertSeverityProposalStatus.PENDING.value
+    proposal.sync_status_reason = "Queued for vector delete sync."
+    session.add(proposal)
+    session.commit()
+    session.refresh(proposal)
+
+    await _enqueue_alert_severity_delete_sync(
+        proposal=proposal,
+        tenant_id=tenant_id,
+        session=session,
+        background_tasks=background_tasks,
+    )
+
+    return AlertSeverityProposalDeleteResponse(
+        id=str(proposal.id),
+        alert_id=str(proposal.alert_id),
+        deleted=True,
+        sync_status=AlertSeverityProposalSyncStatus(proposal.sync_status),
+        sync_status_reason=proposal.sync_status_reason,
+    )
 
 
 @router.get(

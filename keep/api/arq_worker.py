@@ -47,6 +47,14 @@ if KEEP_ARQ_TASK_POOL in [KEEP_ARQ_TASK_POOL_ALL, KEEP_ARQ_TASK_POOL_BASIC_PROCE
             "keep.api.tasks.process_incident_task.async_process_incident",
             KEEP_ARQ_QUEUE_BASIC,
         ),
+        (
+            "keep.api.tasks.sync_alert_severity_proposal_task.async_sync_alert_severity_proposal",
+            KEEP_ARQ_QUEUE_BASIC,
+        ),
+        (
+            "keep.api.tasks.sync_alert_severity_proposal_task.async_delete_alert_severity_proposal",
+            KEEP_ARQ_QUEUE_BASIC,
+        ),
     ]
 
 

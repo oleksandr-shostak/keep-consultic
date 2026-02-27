@@ -26,6 +26,7 @@ from keep.api.core.dependencies import SINGLE_TENANT_UUID
 from keep.api.core.elastic import ElasticClient
 from keep.api.models.alert import AlertStatus
 from keep.api.models.db.alert import *
+from keep.api.models.db.alert_severity_proposal import *
 from keep.api.models.db.maintenance_window import MaintenanceWindowRule
 from keep.api.models.db.provider import *
 from keep.api.models.db.rule import *

@@ -150,6 +150,8 @@ if [[ "$BACKEND_STARTED" == "true" ]]; then
 
   tmux new-window -t keep -n frontend
   tmux send-keys -t keep:frontend "cd /opt/keep/keep-ui" Enter
+  # Keep OpenAI credentials available for backend, but hide them from frontend runtime.
+  tmux send-keys -t keep:frontend "unset OPEN_AI_API_KEY OPENAI_API_KEY OPEN_AI_ORGANIZATION_ID" Enter
   tmux send-keys -t keep:frontend "npm run dev 2>&1 | tee ../logs/frontend.log" Enter
 else
   echo "⚠ Skipping frontend start (backend not running)"

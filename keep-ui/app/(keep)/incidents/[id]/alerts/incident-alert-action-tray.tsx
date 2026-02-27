@@ -1,11 +1,13 @@
 import { AlertDto } from "@/entities/alerts/model";
-import { EyeIcon, LinkIcon } from "@heroicons/react/24/outline";
+import { ArrowUpCircleIcon, EyeIcon, LinkIcon } from "@heroicons/react/24/outline";
 import { Icon } from "@tremor/react";
 import { IoExpandSharp } from "react-icons/io5";
 import { clsx } from "clsx";
 import { Button } from "@/components/ui";
 import { useAlertRowStyle } from "@/entities/alerts/model/useAlertRowStyle";
 import { useExpandedRows } from "@/utils/hooks/useExpandedRows";
+import { useState } from "react";
+import { AlertProposeSeverityModal } from "@/features/alerts/alert-propose-severity";
 
 interface Props {
   alert: AlertDto;
@@ -24,6 +26,8 @@ export function IncidentAlertActionTray({
   const { isRowExpanded, toggleRowExpanded } =
     useExpandedRows("incident-alerts");
   const expanded = isRowExpanded(alert.fingerprint);
+  const [isProposeSeverityModalOpen, setIsProposeSeverityModalOpen] =
+    useState(false);
 
   const actionIconButtonClassName = clsx(
     "text-gray-500 leading-none p-2 prevent-row-click hover:bg-slate-200 [&>[role='tooltip']]:z-50",
@@ -69,6 +73,18 @@ export function IncidentAlertActionTray({
           )}
           tooltip="View Alert Details"
         />
+        <Button
+          className={actionIconButtonClassName}
+          onClick={(e) => {
+            e.stopPropagation();
+            setIsProposeSeverityModalOpen(true);
+          }}
+          variant="light"
+          icon={() => (
+            <Icon icon={ArrowUpCircleIcon} className="w-4 h-4 text-gray-500" />
+          )}
+          tooltip="Propose severity"
+        />
         {!isCandidate && (
           <Button
             className={actionIconButtonClassName}
@@ -84,6 +100,11 @@ export function IncidentAlertActionTray({
           />
         )}
       </div>
+      <AlertProposeSeverityModal
+        alert={alert}
+        isOpen={isProposeSeverityModalOpen}
+        onClose={() => setIsProposeSeverityModalOpen(false)}
+      />
     </div>
   );
 }

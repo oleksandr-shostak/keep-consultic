@@ -17,6 +17,7 @@ import {
   BookOpenIcon,
   XCircleIcon,
   EyeIcon,
+  ArrowUpCircleIcon,
 } from "@heroicons/react/24/outline";
 import {
   CheckCircleIcon,
@@ -47,6 +48,7 @@ import {
 } from "@/components/ui/ImagePreviewTooltip";
 import { useExpandedRows } from "@/utils/hooks/useExpandedRows";
 import { useConfig } from "@/utils/hooks/useConfig";
+import { AlertProposeSeverityModal } from "@/features/alerts/alert-propose-severity";
 
 interface Props {
   alert: AlertDto;
@@ -67,6 +69,7 @@ interface MenuItem {
   onClick: () => void;
   disabled?: boolean;
   show?: boolean;
+  closeSidebarOnClick?: boolean;
 }
 
 // Add the tooltip type
@@ -128,6 +131,8 @@ export function AlertMenu({
   const [imageError, setImageError] = useState(false);
   const [tooltipPosition, setTooltipPosition] = useState<TooltipPosition>(null);
   const imageContainerRef = useRef<HTMLDivElement | null>(null);
+  const [isProposeSeverityModalOpen, setIsProposeSeverityModalOpen] =
+    useState(false);
 
   // Add image-related handlers
   const handleImageClick = (e: React.MouseEvent) => {
@@ -530,6 +535,12 @@ export function AlertMenu({
         onClick: () => setChangeStatusAlert?.(alert),
       },
       {
+        icon: ArrowUpCircleIcon,
+        label: "Propose severity",
+        onClick: () => setIsProposeSeverityModalOpen(true),
+        closeSidebarOnClick: false,
+      },
+      {
         icon: PlusIcon,
         label: "Correlate Incident",
         onClick: () => setIsIncidentSelectorOpen?.(true),
@@ -561,27 +572,36 @@ export function AlertMenu({
 
   if (isInSidebar) {
     return (
-      <Menu as="div" className="w-full">
-        <div className="flex gap-2 w-full flex-wrap">
-          {visibleMenuItems.map((item, index) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.label + index}
-                onClick={() => {
-                  item.onClick();
-                  toggleSidebar?.();
-                }}
-                disabled={item.disabled}
-                className="flex items-center space-x-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50 rounded-tremor-default"
-              >
-                <Icon className="w-4 h-4" />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </Menu>
+      <>
+        <Menu as="div" className="w-full">
+          <div className="flex gap-2 w-full flex-wrap">
+            {visibleMenuItems.map((item, index) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.label + index}
+                  onClick={() => {
+                    item.onClick();
+                    if (item.closeSidebarOnClick !== false) {
+                      toggleSidebar?.();
+                    }
+                  }}
+                  disabled={item.disabled}
+                  className="flex items-center space-x-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50 rounded-tremor-default"
+                >
+                  <Icon className="w-4 h-4" />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </Menu>
+        <AlertProposeSeverityModal
+          alert={alert}
+          isOpen={isProposeSeverityModalOpen}
+          onClose={() => setIsProposeSeverityModalOpen(false)}
+        />
+      </>
     );
   }
 
@@ -606,6 +626,11 @@ export function AlertMenu({
       {tooltipPosition && imageUrl && !imageError && (
         <ImagePreviewTooltip imageUrl={imageUrl} position={tooltipPosition} />
       )}
+      <AlertProposeSeverityModal
+        alert={alert}
+        isOpen={isProposeSeverityModalOpen}
+        onClose={() => setIsProposeSeverityModalOpen(false)}
+      />
     </div>
   );
 }
