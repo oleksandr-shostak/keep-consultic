@@ -7,6 +7,7 @@ import {
 import { Badge, Button, Icon, Subtitle } from "@tremor/react";
 import { Link } from "@/components/ui";
 import { ArrowRightIcon } from "@heroicons/react/16/solid";
+import { ArrowUpCircleIcon } from "@heroicons/react/24/outline";
 import { MdBlock, MdDone, MdModeEdit, MdPlayArrow } from "react-icons/md";
 import React, { useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
@@ -20,6 +21,7 @@ import { CopilotKit } from "@copilotkit/react-core";
 import { TbInfoCircle, TbTopologyStar3 } from "react-icons/tb";
 import { useConfig } from "@/utils/hooks/useConfig";
 import { TicketingIncidentOptions } from "./ticketing-incident-options";
+import { IncidentProposeSeverityModal } from "@/features/incidents/incident-propose-severity";
 
 export function IncidentHeader({
   incident: initialIncidentData,
@@ -38,6 +40,8 @@ export function IncidentHeader({
   const pathname = usePathname();
 
   const [isFormOpen, setIsFormOpen] = useState<boolean>(false);
+  const [isProposeSeverityModalOpen, setIsProposeSeverityModalOpen] =
+    useState<boolean>(false);
 
   const [runWorkflowModalIncident, setRunWorkflowModalIncident] =
     useState<IncidentDto | null>();
@@ -101,6 +105,20 @@ export function IncidentHeader({
                 }}
               >
                 Run Workflow
+              </Button>
+              <Button
+                color="orange"
+                size="xs"
+                variant="secondary"
+                className="!py-0.5 mr-2"
+                icon={ArrowUpCircleIcon}
+                onClick={(e: React.MouseEvent) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setIsProposeSeverityModalOpen(true);
+                }}
+              >
+                Propose severity
               </Button>
               <Button
                 color="orange"
@@ -193,6 +211,11 @@ export function IncidentHeader({
       <ManualRunWorkflowModal
         incident={runWorkflowModalIncident}
         onClose={() => setRunWorkflowModalIncident(null)}
+      />
+      <IncidentProposeSeverityModal
+        incident={incident}
+        isOpen={isProposeSeverityModalOpen}
+        onClose={() => setIsProposeSeverityModalOpen(false)}
       />
     </CopilotKit>
   );

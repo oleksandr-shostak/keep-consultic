@@ -1,4 +1,8 @@
+import datetime
+import hashlib
+import json
 import logging
+import os
 from typing import List, Optional
 from uuid import UUID
 
@@ -8,13 +12,15 @@ from fastapi import (
     BackgroundTasks,
     Body,
     Depends,
+    Header,
     HTTPException,
     Query,
     Request,
     Response,
 )
 from pusher import Pusher
-from sqlmodel import Session
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, select
 
 from keep.api.arq_pool import get_pool
 from keep.api.bl.ai_suggestion_bl import AISuggestionBl
@@ -35,8 +41,8 @@ from keep.api.core.db import (
     get_rule,
     get_session,
     get_workflow_executions_for_incident_or_alert,
-    merge_incidents_to_id,
     get_enrichment,
+    merge_incidents_to_id,
 )
 from keep.api.core.dependencies import extract_generic_body, get_pusher_client
 from keep.api.core.incidents import (
@@ -55,6 +61,10 @@ from keep.api.models.db.alert import (
     CommentMention,
 )
 from keep.api.models.db.incident import IncidentSeverity, IncidentStatus
+from keep.api.models.db.incident_severity_proposal import (
+    IncidentSeverityProposal,
+    IncidentSeverityProposalStatus,
+)
 from keep.api.models.facet import FacetOptionsQueryDto
 from keep.api.models.incident import (
     IncidentCommit,
@@ -64,11 +74,19 @@ from keep.api.models.incident import (
     IncidentsClusteringSuggestion,
     IncidentSeverityChangeDto,
     IncidentSorting,
+    IncidentSeverityProposalDeleteResponse,
+    IncidentSeverityProposalRequest,
+    IncidentSeverityProposalResponse,
+    IncidentSeverityProposalSyncStatus,
     IncidentStatusChangeDto,
     MergeIncidentsRequestDto,
     MergeIncidentsResponseDto,
     SplitIncidentRequestDto,
     SplitIncidentResponseDto,
+)
+from keep.api.tasks.sync_incident_severity_proposal_task import (
+    delete_incident_severity_proposal_from_vector_store,
+    sync_incident_severity_proposal_to_vector_store,
 )
 from keep.api.models.workflow import WorkflowExecutionDTO
 from keep.api.tasks.process_incident_task import process_incident
@@ -805,6 +823,496 @@ async def receive_event(
             trace_id,
         )
     return Response(status_code=202)
+
+
+def _normalize_incident_severity(
+    severity: IncidentSeverity | int | str | None,
+) -> str:
+    if isinstance(severity, IncidentSeverity):
+        return severity.value
+    if isinstance(severity, int):
+        try:
+            return IncidentSeverity.from_number(severity).value
+        except Exception:
+            return IncidentSeverity.INFO.value
+    if isinstance(severity, str):
+        normalized = severity.strip().lower()
+        try:
+            return IncidentSeverity(normalized).value
+        except Exception:
+            return normalized
+    return IncidentSeverity.INFO.value
+
+
+def _get_default_incident_proposal_vector_store_id() -> str | None:
+    for candidate in (
+        os.environ.get("KEEP_INCIDENT_PROPOSAL_VECTOR_STORE_ID"),
+        os.environ.get("KEEP_ALERT_PROPOSAL_VECTOR_STORE_ID"),
+        os.environ.get("OPENAI_INCIDENTS_TRIAGE_VECTOR_STORE_ID"),
+    ):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _serialize_incident_alert_for_snapshot(alert: AlertDto) -> dict:
+    status = alert.status.value if hasattr(alert.status, "value") else str(alert.status)
+    severity = (
+        alert.severity.value if hasattr(alert.severity, "value") else str(alert.severity)
+    )
+    if isinstance(alert.source, list):
+        source = [str(item) for item in alert.source]
+    elif alert.source:
+        source = [str(alert.source)]
+    else:
+        source = []
+    return {
+        "id": str(alert.id) if alert.id is not None else None,
+        "event_id": alert.event_id,
+        "name": alert.name,
+        "status": status,
+        "severity": severity,
+        "fingerprint": alert.fingerprint,
+        "source": source,
+        "provider_id": alert.providerId,
+        "provider_type": alert.providerType,
+        "message": alert.message,
+        "description": alert.description,
+        "last_received": alert.lastReceived,
+    }
+
+
+def _build_incident_snapshot(incident) -> dict:
+    status = (
+        incident.status.value if hasattr(incident.status, "value") else str(incident.status)
+    )
+    name = incident.user_generated_name or incident.ai_generated_name or str(incident.id)
+    return {
+        "id": str(incident.id),
+        "name": name,
+        "status": status,
+        "severity": _normalize_incident_severity(incident.severity),
+        "assignee": incident.assignee,
+        "rule_id": str(incident.rule_id) if incident.rule_id else None,
+        "resolve_on": incident.resolve_on,
+    }
+
+
+def _build_incident_severity_proposal_dedupe_hash(
+    tenant_id: str,
+    incident_id: UUID,
+    proposed_severity: str,
+    reason: str,
+    created_by: str,
+    alert_fingerprints: list[str],
+) -> str:
+    payload = json.dumps(
+        {
+            "tenant_id": tenant_id,
+            "incident_id": str(incident_id),
+            "proposed_severity": proposed_severity,
+            "reason": reason.strip().lower(),
+            "created_by": created_by.strip().lower(),
+            "alert_fingerprints": sorted(set(alert_fingerprints)),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _get_active_incident_proposal(
+    session: Session, tenant_id: str, incident_id: UUID
+) -> IncidentSeverityProposal | None:
+    return session.exec(
+        select(IncidentSeverityProposal)
+        .where(IncidentSeverityProposal.tenant_id == tenant_id)
+        .where(IncidentSeverityProposal.incident_id == incident_id)
+        .where(IncidentSeverityProposal.is_deleted.is_(False))
+        .order_by(IncidentSeverityProposal.created_at.desc())
+    ).first()
+
+
+def _serialize_incident_severity_proposal(
+    proposal: IncidentSeverityProposal, *, deduplicated: bool = False
+) -> IncidentSeverityProposalResponse:
+    return IncidentSeverityProposalResponse(
+        id=str(proposal.id),
+        incident_id=str(proposal.incident_id),
+        incident_name=proposal.incident_name,
+        incident_status=proposal.incident_status,
+        current_severity=proposal.current_severity,
+        proposed_severity=proposal.proposed_severity,
+        reason=proposal.reason,
+        alerts_count=proposal.alerts_count,
+        created_by=proposal.created_by,
+        created_at=proposal.created_at,
+        updated_by=proposal.updated_by,
+        updated_at=proposal.updated_at,
+        deleted_at=proposal.deleted_at,
+        sync_status=IncidentSeverityProposalSyncStatus(proposal.sync_status),
+        sync_status_reason=proposal.sync_status_reason,
+        deduplicated=deduplicated,
+    )
+
+
+async def _enqueue_incident_severity_sync(
+    *,
+    proposal: IncidentSeverityProposal,
+    tenant_id: str,
+    session: Session,
+    background_tasks: BackgroundTasks,
+):
+    if REDIS:
+        redis: ArqRedis = await get_pool()
+        job = await redis.enqueue_job(
+            "async_sync_incident_severity_proposal",
+            tenant_id,
+            str(proposal.id),
+            proposal.vector_store_id,
+            _queue_name=KEEP_ARQ_QUEUE_BASIC,
+        )
+        proposal.sync_status_reason = f"Queued for vector sync (job: {job.job_id})."
+        session.add(proposal)
+        session.commit()
+    else:
+        background_tasks.add_task(
+            sync_incident_severity_proposal_to_vector_store,
+            {},
+            tenant_id,
+            str(proposal.id),
+            proposal.vector_store_id,
+        )
+        proposal.sync_status_reason = "Queued for local vector sync."
+        session.add(proposal)
+        session.commit()
+
+
+async def _enqueue_incident_severity_delete_sync(
+    *,
+    proposal: IncidentSeverityProposal,
+    tenant_id: str,
+    session: Session,
+    background_tasks: BackgroundTasks,
+):
+    if REDIS:
+        redis: ArqRedis = await get_pool()
+        job = await redis.enqueue_job(
+            "async_delete_incident_severity_proposal",
+            tenant_id,
+            str(proposal.id),
+            proposal.vector_store_id,
+            _queue_name=KEEP_ARQ_QUEUE_BASIC,
+        )
+        proposal.sync_status_reason = (
+            f"Queued for vector delete sync (job: {job.job_id})."
+        )
+        session.add(proposal)
+        session.commit()
+    else:
+        background_tasks.add_task(
+            delete_incident_severity_proposal_from_vector_store,
+            {},
+            tenant_id,
+            str(proposal.id),
+            proposal.vector_store_id,
+        )
+        proposal.sync_status_reason = "Queued for local vector delete sync."
+        session.add(proposal)
+        session.commit()
+
+
+@router.get(
+    "/{incident_id}/propose-severity",
+    description="Get user proposed severity for an incident",
+    response_model=IncidentSeverityProposalResponse,
+)
+def get_incident_severity_proposal(
+    incident_id: UUID,
+    authenticated_entity: AuthenticatedEntity = Depends(
+        IdentityManagerFactory.get_auth_verifier(["read:incident"])
+    ),
+    session: Session = Depends(get_session),
+):
+    tenant_id = authenticated_entity.tenant_id
+    incident = get_incident_by_id(tenant_id=tenant_id, incident_id=incident_id, session=session)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    proposal = _get_active_incident_proposal(session, tenant_id, incident_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Severity proposal not found")
+    return _serialize_incident_severity_proposal(proposal)
+
+
+@router.post(
+    "/{incident_id}/propose-severity",
+    description="Store user proposed severity for an incident and queue vector store sync",
+    response_model=IncidentSeverityProposalResponse,
+)
+async def propose_incident_severity(
+    incident_id: UUID,
+    payload: IncidentSeverityProposalRequest,
+    background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    authenticated_entity: AuthenticatedEntity = Depends(
+        IdentityManagerFactory.get_auth_verifier(["write:incident"])
+    ),
+    session: Session = Depends(get_session),
+):
+    tenant_id = authenticated_entity.tenant_id
+    created_by = authenticated_entity.email or "unknown"
+    normalized_idempotency_key = (
+        idempotency_key.strip()[:255] if idempotency_key else None
+    )
+
+    incident = get_incident_by_id(tenant_id=tenant_id, incident_id=incident_id, session=session)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    db_alerts_and_links, _ = get_incident_alerts_and_links_by_incident_id(
+        tenant_id=tenant_id,
+        incident_id=incident_id,
+        limit=None,
+        offset=None,
+        session=session,
+    )
+    alerts_dto = convert_db_alerts_to_dto_alerts(db_alerts_and_links)
+    alerts_snapshot = [
+        _serialize_incident_alert_for_snapshot(alert) for alert in alerts_dto
+    ]
+    alert_fingerprints = [
+        alert.get("fingerprint")
+        for alert in alerts_snapshot
+        if alert.get("fingerprint")
+    ]
+
+    dedupe_hash = _build_incident_severity_proposal_dedupe_hash(
+        tenant_id=tenant_id,
+        incident_id=incident_id,
+        proposed_severity=payload.proposed_severity.value,
+        reason=payload.reason,
+        created_by=created_by,
+        alert_fingerprints=alert_fingerprints,
+    )
+
+    existing_proposal = None
+    if normalized_idempotency_key:
+        existing_proposal = session.exec(
+            select(IncidentSeverityProposal)
+            .where(IncidentSeverityProposal.tenant_id == tenant_id)
+            .where(
+                IncidentSeverityProposal.idempotency_key == normalized_idempotency_key
+            )
+            .where(IncidentSeverityProposal.is_deleted.is_(False))
+        ).first()
+
+    if not existing_proposal:
+        existing_proposal = session.exec(
+            select(IncidentSeverityProposal)
+            .where(IncidentSeverityProposal.tenant_id == tenant_id)
+            .where(IncidentSeverityProposal.dedupe_hash == dedupe_hash)
+            .where(IncidentSeverityProposal.is_deleted.is_(False))
+        ).first()
+
+    deduplicated = existing_proposal is not None
+    proposal = existing_proposal
+    if not proposal:
+        incident_snapshot = _build_incident_snapshot(incident)
+        proposal = IncidentSeverityProposal(
+            tenant_id=tenant_id,
+            incident_id=incident_id,
+            current_severity=_normalize_incident_severity(incident.severity),
+            proposed_severity=payload.proposed_severity.value,
+            reason=payload.reason,
+            incident_name=incident_snapshot["name"],
+            incident_status=incident_snapshot["status"],
+            incident_snapshot=incident_snapshot,
+            alerts_count=len(alerts_snapshot),
+            alerts_snapshot=alerts_snapshot,
+            created_by=created_by,
+            idempotency_key=normalized_idempotency_key,
+            dedupe_hash=dedupe_hash,
+            sync_status=IncidentSeverityProposalStatus.PENDING.value,
+            sync_status_reason="Queued for vector sync.",
+            vector_store_id=_get_default_incident_proposal_vector_store_id(),
+        )
+        session.add(proposal)
+        try:
+            session.commit()
+            session.refresh(proposal)
+        except IntegrityError:
+            session.rollback()
+            proposal = session.exec(
+                select(IncidentSeverityProposal)
+                .where(IncidentSeverityProposal.tenant_id == tenant_id)
+                .where(IncidentSeverityProposal.dedupe_hash == dedupe_hash)
+                .where(IncidentSeverityProposal.is_deleted.is_(False))
+            ).first()
+            deduplicated = proposal is not None
+            if not proposal:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Failed to create severity proposal due to duplicate write",
+                )
+
+    should_enqueue_sync = (
+        not deduplicated
+        or proposal.sync_status == IncidentSeverityProposalStatus.FAILED.value
+    )
+    if should_enqueue_sync:
+        proposal.sync_status = IncidentSeverityProposalStatus.PENDING.value
+        proposal.sync_status_reason = "Queued for vector sync."
+        session.add(proposal)
+        session.commit()
+        await _enqueue_incident_severity_sync(
+            proposal=proposal,
+            tenant_id=tenant_id,
+            session=session,
+            background_tasks=background_tasks,
+        )
+
+    return _serialize_incident_severity_proposal(proposal, deduplicated=deduplicated)
+
+
+@router.put(
+    "/{incident_id}/propose-severity",
+    description="Update user proposed severity for an incident and re-sync vector store entry",
+    response_model=IncidentSeverityProposalResponse,
+)
+async def update_incident_severity_proposal(
+    incident_id: UUID,
+    payload: IncidentSeverityProposalRequest,
+    background_tasks: BackgroundTasks,
+    authenticated_entity: AuthenticatedEntity = Depends(
+        IdentityManagerFactory.get_auth_verifier(["write:incident"])
+    ),
+    session: Session = Depends(get_session),
+):
+    tenant_id = authenticated_entity.tenant_id
+    updated_by = authenticated_entity.email or "unknown"
+
+    incident = get_incident_by_id(tenant_id=tenant_id, incident_id=incident_id, session=session)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    proposal = _get_active_incident_proposal(session, tenant_id, incident_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Severity proposal not found")
+
+    db_alerts_and_links, _ = get_incident_alerts_and_links_by_incident_id(
+        tenant_id=tenant_id,
+        incident_id=incident_id,
+        limit=None,
+        offset=None,
+        session=session,
+    )
+    alerts_dto = convert_db_alerts_to_dto_alerts(db_alerts_and_links)
+    alerts_snapshot = [
+        _serialize_incident_alert_for_snapshot(alert) for alert in alerts_dto
+    ]
+    alert_fingerprints = [
+        alert.get("fingerprint")
+        for alert in alerts_snapshot
+        if alert.get("fingerprint")
+    ]
+
+    dedupe_hash = _build_incident_severity_proposal_dedupe_hash(
+        tenant_id=tenant_id,
+        incident_id=incident_id,
+        proposed_severity=payload.proposed_severity.value,
+        reason=payload.reason,
+        created_by=proposal.created_by,
+        alert_fingerprints=alert_fingerprints,
+    )
+
+    is_noop = (
+        proposal.proposed_severity == payload.proposed_severity.value
+        and proposal.reason.strip() == payload.reason.strip()
+    )
+    if is_noop:
+        return _serialize_incident_severity_proposal(proposal, deduplicated=True)
+
+    incident_snapshot = _build_incident_snapshot(incident)
+    proposal.current_severity = _normalize_incident_severity(incident.severity)
+    proposal.proposed_severity = payload.proposed_severity.value
+    proposal.reason = payload.reason
+    proposal.incident_name = incident_snapshot["name"]
+    proposal.incident_status = incident_snapshot["status"]
+    proposal.incident_snapshot = incident_snapshot
+    proposal.alerts_count = len(alerts_snapshot)
+    proposal.alerts_snapshot = alerts_snapshot
+    proposal.updated_by = updated_by
+    proposal.updated_at = datetime.datetime.now(tz=datetime.timezone.utc)
+    proposal.dedupe_hash = dedupe_hash
+    proposal.sync_status = IncidentSeverityProposalStatus.PENDING.value
+    proposal.sync_status_reason = "Queued for vector sync."
+    session.add(proposal)
+    session.commit()
+    session.refresh(proposal)
+
+    await _enqueue_incident_severity_sync(
+        proposal=proposal,
+        tenant_id=tenant_id,
+        session=session,
+        background_tasks=background_tasks,
+    )
+
+    return _serialize_incident_severity_proposal(proposal)
+
+
+@router.delete(
+    "/{incident_id}/propose-severity",
+    description="Delete user proposed severity for an incident and remove it from vector store",
+    response_model=IncidentSeverityProposalDeleteResponse,
+)
+async def delete_incident_severity_proposal(
+    incident_id: UUID,
+    background_tasks: BackgroundTasks,
+    authenticated_entity: AuthenticatedEntity = Depends(
+        IdentityManagerFactory.get_auth_verifier(["write:incident"])
+    ),
+    session: Session = Depends(get_session),
+):
+    tenant_id = authenticated_entity.tenant_id
+    deleted_by = authenticated_entity.email or "unknown"
+
+    incident = get_incident_by_id(tenant_id=tenant_id, incident_id=incident_id, session=session)
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    proposal = _get_active_incident_proposal(session, tenant_id, incident_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Severity proposal not found")
+
+    proposal.is_deleted = True
+    proposal.deleted_by = deleted_by
+    proposal.deleted_at = datetime.datetime.now(tz=datetime.timezone.utc)
+    proposal.updated_by = deleted_by
+    proposal.updated_at = proposal.deleted_at
+    proposal.idempotency_key = None
+    proposal.dedupe_hash = (
+        f"{proposal.dedupe_hash}:deleted:{int(proposal.deleted_at.timestamp())}"
+    )[:255]
+    proposal.sync_status = IncidentSeverityProposalStatus.PENDING.value
+    proposal.sync_status_reason = "Queued for vector delete sync."
+    session.add(proposal)
+    session.commit()
+    session.refresh(proposal)
+
+    await _enqueue_incident_severity_delete_sync(
+        proposal=proposal,
+        tenant_id=tenant_id,
+        session=session,
+        background_tasks=background_tasks,
+    )
+
+    return IncidentSeverityProposalDeleteResponse(
+        id=str(proposal.id),
+        incident_id=str(proposal.incident_id),
+        deleted=True,
+        sync_status=IncidentSeverityProposalSyncStatus(proposal.sync_status),
+        sync_status_reason=proposal.sync_status_reason,
+    )
 
 
 @router.post("/{incident_id}/assign", description="Assign incident to user")

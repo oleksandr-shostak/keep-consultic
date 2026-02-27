@@ -260,13 +260,29 @@ class OpenaiassistantProvider(BaseProvider):
             elif isinstance(conversation_reference, dict):
                 response_conversation_id = conversation_reference.get("id")
 
-            # Extract output text/items
+            # Extract output text/items.
+            # Keep workflow context rendering cannot safely handle SDK object reprs
+            # (e.g. ResponseFileSearchToolCall(...)), so normalize to plain JSON-serializable
+            # structures before returning them in provider results.
             output_items = list(getattr(response, "output", []) or [])
+            serialized_output_items: List[Any] = []
+            for item in output_items:
+                if hasattr(item, "model_dump"):
+                    try:
+                        serialized_output_items.append(
+                            item.model_dump(mode="json", exclude_none=True)
+                        )
+                    except TypeError:
+                        serialized_output_items.append(item.model_dump())
+                elif isinstance(item, dict):
+                    serialized_output_items.append(item)
+                else:
+                    serialized_output_items.append(str(item))
             output_text = getattr(response, "output_text", "")
 
             if not output_text:
                 text_blocks: List[str] = []
-                for item in output_items:
+                for item in serialized_output_items:
                     content = getattr(item, "content", None)
                     if not content and isinstance(item, dict):
                         content = item.get("content")
@@ -305,7 +321,7 @@ class OpenaiassistantProvider(BaseProvider):
             return {
                 "response": response_parsed,
                 "conversation_id": response_conversation_id,
-                "output_items": output_items,
+                "output_items": serialized_output_items,
                 "raw_response": raw_response,
             }
 

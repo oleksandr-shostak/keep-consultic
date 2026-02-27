@@ -16,6 +16,7 @@ from keep.api.models.db.alert_severity_proposal import *
 from keep.api.models.db.dashboard import *
 from keep.api.models.db.extraction import *
 from keep.api.models.db.facet import *
+from keep.api.models.db.incident_severity_proposal import *
 from keep.api.models.db.maintenance_window import *
 from keep.api.models.db.mapping import *
 from keep.api.models.db.preset import *

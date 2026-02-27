@@ -71,6 +71,7 @@ from keep.api.models.db.dashboard import *  # pylint: disable=unused-wildcard-im
 from keep.api.models.db.enrichment_event import *  # pylint: disable=unused-wildcard-import
 from keep.api.models.db.extraction import *  # pylint: disable=unused-wildcard-import
 from keep.api.models.db.incident import *  # pylint: disable=unused-wildcard-import
+from keep.api.models.db.incident_severity_proposal import *  # pylint: disable=unused-wildcard-import
 from keep.api.models.db.maintenance_window import *  # pylint: disable=unused-wildcard-import
 from keep.api.models.db.mapping import *  # pylint: disable=unused-wildcard-import
 from keep.api.models.db.preset import *  # pylint: disable=unused-wildcard-import

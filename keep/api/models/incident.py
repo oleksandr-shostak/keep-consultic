@@ -39,6 +39,62 @@ class IncidentSeverityChangeDto(BaseModel):
     comment: str | None
 
 
+class IncidentUserProposedSeverity(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class IncidentSeverityProposalSyncStatus(str, Enum):
+    PENDING = "pending"
+    SYNCED = "synced"
+    FAILED = "failed"
+
+
+class IncidentSeverityProposalRequest(BaseModel):
+    proposed_severity: IncidentUserProposedSeverity
+    reason: str
+
+    @validator("reason")
+    def validate_reason(cls, reason: str) -> str:
+        cleaned_reason = reason.strip()
+        if not cleaned_reason:
+            raise ValueError("reason is required")
+        if len(cleaned_reason) < 3:
+            raise ValueError("reason must be at least 3 characters long")
+        if len(cleaned_reason) > 5000:
+            raise ValueError("reason must be less than 5000 characters")
+        return cleaned_reason
+
+
+class IncidentSeverityProposalResponse(BaseModel):
+    id: str
+    incident_id: str
+    incident_name: str
+    incident_status: str
+    current_severity: str
+    proposed_severity: IncidentUserProposedSeverity
+    reason: str
+    alerts_count: int
+    created_by: str
+    created_at: datetime.datetime
+    updated_by: str | None = None
+    updated_at: datetime.datetime | None = None
+    deleted_at: datetime.datetime | None = None
+    sync_status: IncidentSeverityProposalSyncStatus
+    sync_status_reason: str | None = None
+    deduplicated: bool = False
+
+
+class IncidentSeverityProposalDeleteResponse(BaseModel):
+    id: str
+    incident_id: str
+    deleted: bool
+    sync_status: IncidentSeverityProposalSyncStatus
+    sync_status_reason: str | None = None
+
+
 class IncidentDtoIn(BaseModel):
     user_generated_name: str | None
     assignee: str | None
