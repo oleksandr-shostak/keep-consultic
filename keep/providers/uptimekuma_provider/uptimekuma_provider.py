@@ -3,6 +3,7 @@ UptimeKuma is a class that provides the necessary methods to interact with the U
 """
 
 import dataclasses
+from datetime import datetime, timezone
 
 import pydantic
 from socketio.exceptions import BadNamespaceError
@@ -198,7 +199,35 @@ class UptimekumaProvider(BaseProvider):
 
     @staticmethod
     def _format_datetime(dt, offset):
-        return dt + offset
+        dt_str = str(dt or "").strip()
+        offset_str = str(offset or "").strip()
+
+        if not dt_str:
+            return datetime.now(timezone.utc).isoformat()
+
+        # Already timezone-aware (e.g. "...+00:00" or "...Z"), do not append offset again.
+        if dt_str.endswith("Z"):
+            return dt_str
+        if (
+            len(dt_str) >= 6
+            and dt_str[-6] in ("+", "-")
+            and dt_str[-3] == ":"
+            and dt_str[-5:-3].isdigit()
+            and dt_str[-2:].isdigit()
+        ):
+            return dt_str
+
+        # Naive timestamp: append provided offset when valid.
+        if (
+            len(offset_str) == 6
+            and offset_str[0] in ("+", "-")
+            and offset_str[3] == ":"
+            and offset_str[1:3].isdigit()
+            and offset_str[4:6].isdigit()
+        ):
+            return f"{dt_str}{offset_str}"
+
+        return dt_str
 
 if __name__ == "__main__":
     import logging
