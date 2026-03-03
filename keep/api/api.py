@@ -55,6 +55,7 @@ from keep.api.routes import (
     settings,
     status,
     tags,
+    triage_kb,
     topology,
     whoami,
     workflows,
@@ -322,6 +323,7 @@ def get_app(
     app.include_router(tags.router, prefix="/tags", tags=["tags"])
     app.include_router(maintenance.router, prefix="/maintenance", tags=["maintenance"])
     app.include_router(topology.router, prefix="/topology", tags=["topology"])
+    app.include_router(triage_kb.router, prefix="/triage-kb", tags=["triage-kb"])
     app.include_router(
         deduplications.router, prefix="/deduplications", tags=["deduplications"]
     )
@@ -442,4 +444,3 @@ def run(app: FastAPI):
         workers=config("KEEP_WORKERS", default=None, cast=int),
         limit_concurrency=config("KEEP_LIMIT_CONCURRENCY", default=None, cast=int),
     )
-

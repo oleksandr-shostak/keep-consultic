@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, root_validator
 Severity = Literal["info", "warning", "high", "critical"]
 Scope = Literal["alert", "incident"]
 TriageMode = Literal["single", "batch"]
+TriageRunStatus = Literal["success", "failed"]
 
 
 class AlertInput(BaseModel):
@@ -147,3 +148,28 @@ class TriageResponse(BaseModel):
     reason: str
     validated_fingerprints: list[str]
     matched_rules: list[str] = Field(default_factory=list)
+
+
+class TriageRunSummary(BaseModel):
+    id: UUID
+    tenant_id: str
+    incident_id: str
+    mode: TriageMode
+    status: TriageRunStatus
+    recommended_severity: Severity | None = None
+    reason: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    completed_at: datetime
+
+
+class TriageRunDetail(TriageRunSummary):
+    request_payload: dict[str, Any] = Field(default_factory=dict)
+    retrieval_trace: list[dict[str, Any]] = Field(default_factory=list)
+    llm_trace: list[dict[str, Any]] = Field(default_factory=list)
+    response_payload: dict[str, Any] | None = None
+
+
+class TriageRunsListResponse(BaseModel):
+    items: list[TriageRunSummary]
+    count: int

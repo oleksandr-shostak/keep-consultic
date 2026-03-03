@@ -86,6 +86,10 @@ Response (контракт):
 }
 ```
 
+### 3) Triage run logs (request/retrieval/LLM/response)
+- `GET /v1/triage/runs?tenant_id=<id>&limit=100&incident_id=<optional>&mode=single|batch`
+- `GET /v1/triage/runs/{run_id}?tenant_id=<id>`
+
 ## Режими
 - `mode=single`: аналіз кожного алерта окремо + агрегування максимуму severity.
 - `mode=batch`: аналіз всіх алертів інцидента одним запитом в LLM.

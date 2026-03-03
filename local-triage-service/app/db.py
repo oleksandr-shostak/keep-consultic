@@ -42,6 +42,27 @@ CREATE INDEX IF NOT EXISTS ix_kb_examples_tenant_scope
 CREATE INDEX IF NOT EXISTS ix_kb_examples_tenant_proposed
     ON kb_examples (tenant_id, proposed_severity)
     WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS triage_runs (
+    id UUID PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    incident_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('single','batch')),
+    status TEXT NOT NULL CHECK (status IN ('success','failed')),
+    request_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    retrieval_trace JSONB NOT NULL DEFAULT '[]'::jsonb,
+    llm_trace JSONB NOT NULL DEFAULT '[]'::jsonb,
+    response_payload JSONB NULL,
+    error_message TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS ix_triage_runs_tenant_created
+    ON triage_runs (tenant_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS ix_triage_runs_tenant_incident
+    ON triage_runs (tenant_id, incident_id, created_at DESC);
 """
 
 

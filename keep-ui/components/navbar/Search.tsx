@@ -26,7 +26,7 @@ import {
 } from "@heroicons/react/24/outline";
 import { VscDebugDisconnect } from "react-icons/vsc";
 import { LuWorkflow } from "react-icons/lu";
-import { AiOutlineAlert, AiOutlineGroup } from "react-icons/ai";
+import { AiOutlineAlert, AiOutlineDatabase, AiOutlineGroup } from "react-icons/ai";
 import { MdOutlineEngineering, MdOutlineSearchOff } from "react-icons/md";
 import { useConfig } from "utils/hooks/useConfig";
 import { Session } from "next-auth";
@@ -45,6 +45,12 @@ const NAVIGATION_OPTIONS = [
     label: "Go to alert console",
     shortcut: ["g"],
     navigate: "/alerts/feed",
+  },
+  {
+    icon: AiOutlineDatabase,
+    label: "Go to triage knowledge base",
+    shortcut: ["kb"],
+    navigate: "/alerts/knowledge-base",
   },
   {
     icon: AiOutlineGroup,

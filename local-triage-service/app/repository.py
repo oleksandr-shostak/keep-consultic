@@ -43,6 +43,22 @@ class KBCandidate:
     similarity: float
 
 
+@dataclass
+class TriageRunRecord:
+    id: UUID
+    tenant_id: str
+    incident_id: str
+    mode: str
+    status: str
+    request_payload: dict[str, Any]
+    retrieval_trace: list[dict[str, Any]]
+    llm_trace: list[dict[str, Any]]
+    response_payload: dict[str, Any] | None
+    error_message: str | None
+    created_at: datetime
+    completed_at: datetime
+
+
 class KnowledgeBaseRepository:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -282,6 +298,103 @@ class KnowledgeBaseRepository:
             )
         return candidates
 
+    def create_triage_run(
+        self,
+        *,
+        tenant_id: str,
+        incident_id: str,
+        mode: str,
+        status: str,
+        request_payload: dict[str, Any],
+        retrieval_trace: list[dict[str, Any]],
+        llm_trace: list[dict[str, Any]],
+        response_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> TriageRunRecord:
+        run_id = uuid4()
+        now = datetime.now(timezone.utc)
+        with get_conn(self.settings) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO triage_runs (
+                        id, tenant_id, incident_id, mode, status, request_payload,
+                        retrieval_trace, llm_trace, response_payload, error_message,
+                        created_at, completed_at
+                    ) VALUES (
+                        %(id)s, %(tenant_id)s, %(incident_id)s, %(mode)s, %(status)s, %(request_payload)s::jsonb,
+                        %(retrieval_trace)s::jsonb, %(llm_trace)s::jsonb, %(response_payload)s::jsonb, %(error_message)s,
+                        %(created_at)s, %(completed_at)s
+                    )
+                    RETURNING *
+                    """,
+                    {
+                        "id": run_id,
+                        "tenant_id": tenant_id,
+                        "incident_id": incident_id,
+                        "mode": mode,
+                        "status": status,
+                        "request_payload": json.dumps(request_payload or {}),
+                        "retrieval_trace": json.dumps(retrieval_trace or []),
+                        "llm_trace": json.dumps(llm_trace or []),
+                        "response_payload": (
+                            json.dumps(response_payload)
+                            if response_payload is not None
+                            else None
+                        ),
+                        "error_message": error_message,
+                        "created_at": now,
+                        "completed_at": now,
+                    },
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return self._to_triage_run(row)
+
+    def list_triage_runs(
+        self,
+        *,
+        tenant_id: str,
+        limit: int = 100,
+        incident_id: str | None = None,
+        mode: str | None = None,
+    ) -> list[TriageRunRecord]:
+        with get_conn(self.settings) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                conditions = ["tenant_id = %(tenant_id)s"]
+                params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
+                if incident_id:
+                    conditions.append("incident_id = %(incident_id)s")
+                    params["incident_id"] = incident_id
+                if mode:
+                    conditions.append("mode = %(mode)s")
+                    params["mode"] = mode
+                where_clause = " AND ".join(conditions)
+                cur.execute(
+                    f"""
+                    SELECT * FROM triage_runs
+                    WHERE {where_clause}
+                    ORDER BY created_at DESC
+                    LIMIT %(limit)s
+                    """,
+                    params,
+                )
+                rows = cur.fetchall()
+                return [self._to_triage_run(row) for row in rows]
+
+    def get_triage_run(self, *, tenant_id: str, run_id: UUID) -> TriageRunRecord | None:
+        with get_conn(self.settings) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM triage_runs
+                    WHERE tenant_id = %(tenant_id)s AND id = %(id)s::uuid
+                    """,
+                    {"tenant_id": tenant_id, "id": str(run_id)},
+                )
+                row = cur.fetchone()
+                return self._to_triage_run(row) if row else None
+
     @staticmethod
     def _to_record(row: dict[str, Any]) -> KBExampleRecord:
         return KBExampleRecord(
@@ -302,4 +415,21 @@ class KnowledgeBaseRepository:
             provider_id=row.get("provider_id"),
             incident_alerts=row.get("incident_alerts") or [],
             metadata=row.get("metadata") or {},
+        )
+
+    @staticmethod
+    def _to_triage_run(row: dict[str, Any]) -> TriageRunRecord:
+        return TriageRunRecord(
+            id=row["id"],
+            tenant_id=row["tenant_id"],
+            incident_id=row["incident_id"],
+            mode=row["mode"],
+            status=row["status"],
+            request_payload=row.get("request_payload") or {},
+            retrieval_trace=row.get("retrieval_trace") or [],
+            llm_trace=row.get("llm_trace") or [],
+            response_payload=row.get("response_payload"),
+            error_message=row.get("error_message"),
+            created_at=row["created_at"],
+            completed_at=row["completed_at"],
         )

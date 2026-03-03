@@ -13,6 +13,9 @@ from app.schemas import (
     KBExamplesListResponse,
     KBExampleUpdate,
     TriageRequest,
+    TriageRunDetail,
+    TriageRunSummary,
+    TriageRunsListResponse,
     TriageResponse,
 )
 from app.triage import TriageEngine
@@ -137,3 +140,72 @@ def triage_incident(
         return triage_engine.triage(payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/triage/runs", response_model=TriageRunsListResponse)
+def list_triage_runs(
+    tenant_id: str = Query(..., min_length=1),
+    incident_id: str | None = Query(default=None),
+    mode: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+):
+    _require_api_token(authorization)
+    if mode and mode not in {"single", "batch"}:
+        raise HTTPException(status_code=400, detail="mode must be single or batch")
+
+    runs = repo.list_triage_runs(
+        tenant_id=tenant_id,
+        incident_id=incident_id,
+        mode=mode,
+        limit=limit,
+    )
+    items: list[TriageRunSummary] = []
+    for run in runs:
+        response_payload = run.response_payload or {}
+        items.append(
+            TriageRunSummary(
+                id=run.id,
+                tenant_id=run.tenant_id,
+                incident_id=run.incident_id,
+                mode=run.mode,
+                status=run.status,
+                recommended_severity=response_payload.get("recommended_severity"),
+                reason=response_payload.get("reason"),
+                error_message=run.error_message,
+                created_at=run.created_at,
+                completed_at=run.completed_at,
+            )
+        )
+
+    return TriageRunsListResponse(items=items, count=len(items))
+
+
+@app.get("/v1/triage/runs/{run_id}", response_model=TriageRunDetail)
+def get_triage_run(
+    run_id: UUID,
+    tenant_id: str = Query(..., min_length=1),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+):
+    _require_api_token(authorization)
+    run = repo.get_triage_run(tenant_id=tenant_id, run_id=run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Triage run not found")
+
+    response_payload = run.response_payload or {}
+    return TriageRunDetail(
+        id=run.id,
+        tenant_id=run.tenant_id,
+        incident_id=run.incident_id,
+        mode=run.mode,
+        status=run.status,
+        recommended_severity=response_payload.get("recommended_severity"),
+        reason=response_payload.get("reason"),
+        error_message=run.error_message,
+        created_at=run.created_at,
+        completed_at=run.completed_at,
+        request_payload=run.request_payload or {},
+        retrieval_trace=run.retrieval_trace or [],
+        llm_trace=run.llm_trace or [],
+        response_payload=run.response_payload,
+    )

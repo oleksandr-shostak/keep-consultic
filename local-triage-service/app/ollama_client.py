@@ -41,7 +41,13 @@ class OllamaClient:
             raise RuntimeError("Ollama embedding response did not include embeddings")
         return [float(x) for x in embeddings[0]]
 
-    def chat_json(self, system_prompt: str, user_payload: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    def chat_json(
+        self,
+        system_prompt: str,
+        user_payload: dict[str, Any],
+        schema: dict[str, Any],
+        return_debug: bool = False,
+    ) -> dict[str, Any]:
         payload = {
             "model": self.settings.ollama_chat_model,
             "stream": False,
@@ -59,13 +65,24 @@ class OllamaClient:
                 "num_ctx": self.settings.llm_num_ctx,
             },
         }
-        response = self.client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)
+        response = self.client.post(
+            f"{self.settings.ollama_base_url}/api/chat",
+            json=payload,
+        )
         response.raise_for_status()
         body = response.json()
         content = ((body.get("message") or {}).get("content") or "").strip()
         if not content:
             raise RuntimeError("Ollama returned empty message content")
         try:
-            return json.loads(content)
+            parsed = json.loads(content)
+            if return_debug:
+                return {
+                    "parsed": parsed,
+                    "raw_content": content,
+                    "raw_response": body,
+                    "request_payload": payload,
+                }
+            return parsed
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"Ollama JSON parse failed: {content}") from exc

@@ -6,7 +6,7 @@ import {
   CustomPresetAlertLinks,
   usePresetAlertsCount,
 } from "@/features/presets/custom-preset-links";
-import { AiOutlineSwap } from "react-icons/ai";
+import { AiOutlineSwap, AiOutlineDatabase } from "react-icons/ai";
 import { FiFilter } from "react-icons/fi";
 import { Disclosure } from "@headlessui/react";
 import { IoChevronUp } from "react-icons/io5";
@@ -128,6 +128,15 @@ export const AlertsLinks = ({ session }: AlertsLinksProps) => {
                   </LinkWithIcon>
                 </li>
               )}
+              <li>
+                <LinkWithIcon
+                  href="/alerts/knowledge-base"
+                  icon={AiOutlineDatabase}
+                  testId="menu-alerts-knowledge-base"
+                >
+                  <Subtitle className="text-xs">Knowledge Base</Subtitle>
+                </LinkWithIcon>
+              </li>
               <CustomPresetAlertLinks selectedTags={storedTags} />
             </Disclosure.Panel>
           </>

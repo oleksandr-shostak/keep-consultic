@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import Settings
@@ -46,6 +47,8 @@ SEVERITY_RANK = {
     "critical": 3,
 }
 
+logger = logging.getLogger("local-triage-service")
+
 
 @dataclass
 class AlertDecision:
@@ -53,6 +56,7 @@ class AlertDecision:
     severity: str
     reason: str
     matched_rules: list[str]
+    trace: dict[str, Any] = field(default_factory=dict)
 
 
 class TriageEngine:
@@ -102,7 +106,7 @@ class TriageEngine:
         payload: dict[str, Any],
         candidates: list[KBCandidate],
         system_prompt: str | None = None,
-    ) -> tuple[str, str, list[str]]:
+    ) -> tuple[str, str, list[str], dict[str, Any]]:
         kb_payload = [
             {
                 "id": str(c.id),
@@ -113,14 +117,16 @@ class TriageEngine:
             }
             for c in candidates
         ]
-        raw = self.ollama.chat_json(
+        model_response = self.ollama.chat_json(
             system_prompt=(system_prompt.strip() if system_prompt else SYSTEM_PROMPT),
             user_payload={
                 **payload,
                 "kb_candidates": kb_payload,
             },
             schema=TRIAGE_OUTPUT_SCHEMA,
+            return_debug=True,
         )
+        raw = model_response.get("parsed") or {}
         severity, reason, matched_rule_ids = self._normalize_decision(
             raw, {str(c.id) for c in candidates}
         )
@@ -136,7 +142,29 @@ class TriageEngine:
                     f"Severity aligned with highest matched KB example ({max_matched}). "
                     f"{reason}"
                 )
-        return severity, reason, matched_rule_ids
+        return severity, reason, matched_rule_ids, {
+            "system_prompt": system_prompt.strip() if system_prompt else SYSTEM_PROMPT,
+            "user_payload": payload,
+            "kb_candidates": kb_payload,
+            "raw_content": model_response.get("raw_content"),
+            "raw_response": model_response.get("raw_response"),
+            "request_payload": model_response.get("request_payload"),
+            "normalized_response": {
+                "recommended_severity": severity,
+                "reason": reason,
+                "matched_rule_ids": matched_rule_ids,
+            },
+        }
+
+    @staticmethod
+    def _serialize_candidate(candidate: KBCandidate) -> dict[str, Any]:
+        return {
+            "id": str(candidate.id),
+            "proposed_severity": candidate.proposed_severity,
+            "reason": candidate.reason,
+            "similarity": round(candidate.similarity, 4),
+            "metadata": candidate.metadata,
+        }
 
     def _triage_single_alert(
         self,
@@ -153,15 +181,23 @@ class TriageEngine:
             top_k=top_k,
             similarity_threshold=self.settings.similarity_threshold,
         )
+        retrieval_trace = {
+            "mode": "single",
+            "alert_fingerprint": alert.fingerprint,
+            "top_k": top_k,
+            "similarity_threshold": self.settings.similarity_threshold,
+            "candidates": [self._serialize_candidate(c) for c in candidates],
+        }
         if not candidates:
             return AlertDecision(
                 fingerprint=alert.fingerprint,
                 severity="warning",
                 reason="No relevant KB examples found",
                 matched_rules=[],
+                trace={"retrieval": retrieval_trace},
             )
 
-        severity, reason, matched_rule_ids = self._ask_model(
+        severity, reason, matched_rule_ids, llm_trace = self._ask_model(
             payload={
                 "mode": "single",
                 "alert": {
@@ -184,6 +220,10 @@ class TriageEngine:
             severity=severity,
             reason=reason,
             matched_rules=matched_rule_ids,
+            trace={
+                "retrieval": retrieval_trace,
+                "llm": llm_trace,
+            },
         )
 
     @staticmethod
@@ -217,64 +257,151 @@ class TriageEngine:
 
     def triage(self, request: TriageRequest) -> TriageResponse:
         top_k = request.top_k or self.settings.top_k
-
-        if request.mode == "single":
-            decisions = [
-                self._triage_single_alert(
-                    request.tenant_id,
-                    alert,
-                    top_k,
-                    system_prompt=request.system_prompt,
-                )
+        request_payload = {
+            "tenant_id": request.tenant_id,
+            "incident_id": request.incident_id,
+            "mode": request.mode,
+            "top_k": top_k,
+            "system_prompt": request.system_prompt,
+            "alerts": [
+                {
+                    "id": alert.id,
+                    "fingerprint": alert.fingerprint,
+                    "name": alert.name,
+                    "status": alert.status,
+                    "severity": alert.severity,
+                    "source": alert.source,
+                    "provider_id": alert.provider_id,
+                    "message": alert.message,
+                    "description": alert.description,
+                }
                 for alert in request.alerts
-            ]
-            return self._aggregate_alert_decisions(request.incident_id, decisions)
+            ],
+        }
+        retrieval_trace: list[dict[str, Any]] = []
+        llm_trace: list[dict[str, Any]] = []
 
-        # batch mode
-        combined_text = "\n\n---\n\n".join(self._alert_text(a) for a in request.alerts)
-        embedding = self.ollama.embed(combined_text)
-        candidates = self.repo.search(
-            tenant_id=request.tenant_id,
-            embedding=embedding,
-            top_k=top_k,
-            similarity_threshold=self.settings.similarity_threshold,
-        )
+        try:
+            if request.mode == "single":
+                decisions = [
+                    self._triage_single_alert(
+                        request.tenant_id,
+                        alert,
+                        top_k,
+                        system_prompt=request.system_prompt,
+                    )
+                    for alert in request.alerts
+                ]
+                for decision in decisions:
+                    if decision.trace.get("retrieval"):
+                        retrieval_trace.append(decision.trace["retrieval"])
+                    if decision.trace.get("llm"):
+                        llm_trace.append(decision.trace["llm"])
+                response = self._aggregate_alert_decisions(request.incident_id, decisions)
+            else:
+                # batch mode
+                combined_text = "\n\n---\n\n".join(
+                    self._alert_text(a) for a in request.alerts
+                )
+                embedding = self.ollama.embed(combined_text)
+                candidates = self.repo.search(
+                    tenant_id=request.tenant_id,
+                    embedding=embedding,
+                    top_k=top_k,
+                    similarity_threshold=self.settings.similarity_threshold,
+                )
 
-        if not candidates:
-            return TriageResponse(
-                incident_id=request.incident_id,
-                recommended_severity="warning",
-                reason="No relevant KB examples found",
-                validated_fingerprints=[a.fingerprint for a in request.alerts],
-                matched_rules=[],
-            )
-
-        severity, reason, matched_rule_ids = self._ask_model(
-            payload={
-                "mode": "batch",
-                "incident_id": request.incident_id,
-                "alerts": [
+                retrieval_trace.append(
                     {
-                        "fingerprint": a.fingerprint,
-                        "name": a.name,
-                        "message": a.message,
-                        "description": a.description,
-                        "status": a.status,
-                        "severity": a.severity,
-                        "source": a.source,
-                        "provider_id": a.provider_id,
+                        "mode": "batch",
+                        "incident_id": request.incident_id,
+                        "top_k": top_k,
+                        "similarity_threshold": self.settings.similarity_threshold,
+                        "candidates": [
+                            self._serialize_candidate(candidate)
+                            for candidate in candidates
+                        ],
                     }
-                    for a in request.alerts
-                ],
-            },
-            candidates=candidates,
-            system_prompt=request.system_prompt,
-        )
+                )
 
-        return TriageResponse(
-            incident_id=request.incident_id,
-            recommended_severity=severity,
-            reason=reason,
-            validated_fingerprints=[a.fingerprint for a in request.alerts],
-            matched_rules=matched_rule_ids,
-        )
+                if not candidates:
+                    response = TriageResponse(
+                        incident_id=request.incident_id,
+                        recommended_severity="warning",
+                        reason="No relevant KB examples found",
+                        validated_fingerprints=[a.fingerprint for a in request.alerts],
+                        matched_rules=[],
+                    )
+                else:
+                    severity, reason, matched_rule_ids, batch_llm_trace = self._ask_model(
+                        payload={
+                            "mode": "batch",
+                            "incident_id": request.incident_id,
+                            "alerts": [
+                                {
+                                    "fingerprint": a.fingerprint,
+                                    "name": a.name,
+                                    "message": a.message,
+                                    "description": a.description,
+                                    "status": a.status,
+                                    "severity": a.severity,
+                                    "source": a.source,
+                                    "provider_id": a.provider_id,
+                                }
+                                for a in request.alerts
+                            ],
+                        },
+                        candidates=candidates,
+                        system_prompt=request.system_prompt,
+                    )
+                    llm_trace.append(batch_llm_trace)
+                    response = TriageResponse(
+                        incident_id=request.incident_id,
+                        recommended_severity=severity,
+                        reason=reason,
+                        validated_fingerprints=[a.fingerprint for a in request.alerts],
+                        matched_rules=matched_rule_ids,
+                    )
+
+            self.repo.create_triage_run(
+                tenant_id=request.tenant_id,
+                incident_id=request.incident_id,
+                mode=request.mode,
+                status="success",
+                request_payload=request_payload,
+                retrieval_trace=retrieval_trace,
+                llm_trace=llm_trace,
+                response_payload=response.dict(),
+            )
+            return response
+        except Exception as exc:
+            logger.exception(
+                "Triage failed",
+                extra={
+                    "tenant_id": request.tenant_id,
+                    "incident_id": request.incident_id,
+                    "mode": request.mode,
+                },
+            )
+            try:
+                self.repo.create_triage_run(
+                    tenant_id=request.tenant_id,
+                    incident_id=request.incident_id,
+                    mode=request.mode,
+                    status="failed",
+                    request_payload=request_payload,
+                    retrieval_trace=retrieval_trace,
+                    llm_trace=llm_trace,
+                    response_payload=None,
+                    error_message=str(exc),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist triage failure log",
+                    extra={
+                        "tenant_id": request.tenant_id,
+                        "incident_id": request.incident_id,
+                        "mode": request.mode,
+                    },
+                )
+            raise

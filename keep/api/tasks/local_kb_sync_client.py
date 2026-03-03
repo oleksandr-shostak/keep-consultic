@@ -89,6 +89,31 @@ class LocalKBSyncClient:
             params={"tenant_id": tenant_id},
         )
 
+    def list_triage_runs(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+        incident_id: str | None = None,
+        mode: str | None = None,
+    ) -> dict:
+        params: dict[str, str | int] = {
+            "tenant_id": tenant_id,
+            "limit": limit,
+        }
+        if incident_id:
+            params["incident_id"] = incident_id
+        if mode:
+            params["mode"] = mode
+        return self._request("GET", "/v1/triage/runs", params=params)
+
+    def get_triage_run(self, run_id: str, tenant_id: str) -> dict:
+        return self._request(
+            "GET",
+            f"/v1/triage/runs/{run_id}",
+            params={"tenant_id": tenant_id},
+        )
+
 
 def _load_api_token_from_file(file_path: str | None) -> str | None:
     if not file_path:
