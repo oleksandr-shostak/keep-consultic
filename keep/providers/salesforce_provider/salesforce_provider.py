@@ -553,6 +553,11 @@ class SalesforceProvider(BaseIncidentProvider):
         )
         attempt = 0
         retried_after_unauthorized = False
+        # Defensive copy: fallback logic may drop invalid restricted-picklist fields and retry.
+        payload_for_request = (
+            dict(json_payload) if isinstance(json_payload, dict) else json_payload
+        )
+        dropped_restricted_picklist_fields: set[str] = set()
         while True:
             request_headers = self._get_headers(extra_headers)
             response = requests.request(
@@ -560,7 +565,11 @@ class SalesforceProvider(BaseIncidentProvider):
                 url=url,
                 headers=request_headers,
                 params=params,
-                json=json_payload,
+                json=(
+                    dict(payload_for_request)
+                    if isinstance(payload_for_request, dict)
+                    else payload_for_request
+                ),
                 timeout=self.authentication_config.timeout_seconds,
             )
             if (
@@ -581,6 +590,73 @@ class SalesforceProvider(BaseIncidentProvider):
 
             if allow_404 and response.status_code == 404:
                 return response.status_code, None
+
+            # If Salesforce rejects a restricted picklist value, drop known optional fields
+            # and retry once per field to avoid hard-failing the whole workflow sync.
+            if response.status_code == 400 and isinstance(payload_for_request, dict):
+                parsed_error_payload: dict | list | None = None
+                try:
+                    parsed_error_payload = response.json()
+                except Exception:
+                    parsed_error_payload = None
+
+                restricted_fields = self._extract_restricted_picklist_fields(
+                    parsed_error_payload
+                )
+                lowered_restricted_fields = {
+                    str(field).strip().lower() for field in restricted_fields if field
+                }
+                response_text_lower = str(response.text or "").lower()
+                is_restricted_picklist_error = (
+                    "invalid_or_null_for_restricted_picklist" in response_text_lower
+                    or "restricted picklist" in response_text_lower
+                    or bool(lowered_restricted_fields)
+                )
+
+                if is_restricted_picklist_error:
+                    removed_restricted_field = False
+                    for candidate in ("Canal_Source__c", "Origin"):
+                        candidate_lower = candidate.lower()
+                        if candidate_lower in dropped_restricted_picklist_fields:
+                            continue
+                        has_candidate_in_payload = any(
+                            str(key).strip().lower() == candidate_lower
+                            for key in payload_for_request.keys()
+                        )
+                        if not has_candidate_in_payload:
+                            continue
+
+                        candidate_mentioned = candidate_lower in lowered_restricted_fields
+                        if not candidate_mentioned and candidate_lower == "canal_source__c":
+                            candidate_mentioned = any(
+                                "canal" in field for field in lowered_restricted_fields
+                            )
+                        if not candidate_mentioned and candidate_lower == "origin":
+                            candidate_mentioned = any(
+                                "origin" in field for field in lowered_restricted_fields
+                            )
+                        if not candidate_mentioned and not lowered_restricted_fields:
+                            candidate_mentioned = True
+
+                        if candidate_mentioned:
+                            removed_key = self._drop_field_case_insensitive(
+                                payload_for_request, candidate
+                            )
+                            if removed_key:
+                                dropped_restricted_picklist_fields.add(candidate_lower)
+                                removed_restricted_field = True
+                                self.logger.warning(
+                                    "Salesforce API rejected restricted picklist; retrying without field",
+                                    extra={
+                                        "provider_id": self.provider_id,
+                                        "url": url,
+                                        "method": method.upper(),
+                                        "removed_field": removed_key,
+                                    },
+                                )
+                                break
+                    if removed_restricted_field:
+                        continue
 
             should_retry = response.status_code == 429 or 500 <= response.status_code < 600
             if should_retry and attempt < retry_max_attempts:
@@ -623,6 +699,63 @@ class SalesforceProvider(BaseIncidentProvider):
             except Exception:
                 payload = {"raw": response.text}
             return response.status_code, payload
+
+    @staticmethod
+    def _drop_field_case_insensitive(payload: dict, field_name: str) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        target = str(field_name or "").strip().lower()
+        if not target:
+            return None
+        for key in list(payload.keys()):
+            if str(key).strip().lower() == target:
+                payload.pop(key, None)
+                return str(key)
+        return None
+
+    @staticmethod
+    def _extract_restricted_picklist_fields(
+        error_payload: dict | list | None,
+    ) -> set[str]:
+        fields: set[str] = set()
+        if isinstance(error_payload, list):
+            entries = error_payload
+        elif isinstance(error_payload, dict):
+            errors_value = error_payload.get("errors")
+            if isinstance(errors_value, list):
+                entries = errors_value
+            else:
+                entries = [error_payload]
+        else:
+            return fields
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            error_code = str(entry.get("errorCode") or entry.get("code") or "").upper()
+            message = str(entry.get("message") or "")
+            is_restricted_picklist = (
+                "INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST" in error_code
+                or "RESTRICTED_PICKLIST" in error_code
+                or "restricted picklist" in message.lower()
+            )
+            if not is_restricted_picklist:
+                continue
+
+            raw_fields = entry.get("fields")
+            if isinstance(raw_fields, list):
+                for field in raw_fields:
+                    if field not in (None, ""):
+                        fields.add(str(field))
+            elif raw_fields not in (None, ""):
+                fields.add(str(raw_fields))
+
+            message_lower = message.lower()
+            if "canal" in message_lower:
+                fields.add("Canal_Source__c")
+            if "origin" in message_lower:
+                fields.add("Origin")
+        return fields
 
     @staticmethod
     def _parse_datetime(value: typing.Any) -> datetime.datetime | None:
@@ -1101,6 +1234,47 @@ class SalesforceProvider(BaseIncidentProvider):
             if priority not in (None, "")
             else self._resolve_incident_context_value("severity", "")
         )
+        resolved_status_text = self._to_text_value(resolved_status).strip().lower()
+
+        context_enrichments = self._resolve_incident_context_value("enrichments", {})
+        if not isinstance(context_enrichments, dict):
+            context_enrichments = {}
+        context_case_id = (
+            kwargs.get("salesforce_case_id")
+            or context_enrichments.get("salesforce_case_id")
+            or context_enrichments.get("sf_case_id")
+            or ""
+        )
+        context_last_sync_status = (
+            kwargs.get("sf_last_sync_status")
+            or context_enrichments.get("sf_last_sync_status")
+            or ""
+        )
+        if (
+            mode_normalized == "upsert"
+            and context_case_id
+            and resolved_status_text
+            and str(context_last_sync_status).strip().lower() == resolved_status_text
+        ):
+            self.logger.info(
+                "Salesforce upsert skipped: status already synchronized",
+                extra={
+                    "provider_id": self.provider_id,
+                    "keep_incident_id": keep_incident_id,
+                    "salesforce_case_id": str(context_case_id),
+                    "status": resolved_status_text,
+                },
+            )
+            case = self._get_case_by_id(str(context_case_id))
+            return {
+                "case": self._normalize_case_result(
+                    case, fallback_case_id=str(context_case_id)
+                ),
+                "existing": True,
+                "created": False,
+                "action": "upsert_noop",
+                "synced_from": "keep",
+            }
 
         payload = self._build_case_payload(
             subject=subject,

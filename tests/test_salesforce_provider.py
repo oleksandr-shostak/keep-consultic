@@ -296,6 +296,95 @@ def test_notify_create_mode_preserves_explicit_canal_source(mock_request, salesf
 
 
 @patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_notify_create_mode_retries_without_invalid_default_canal_source(
+    mock_request, salesforce_provider
+):
+    mock_request.side_effect = [
+        _build_response(
+            400,
+            [
+                {
+                    "message": "Canal (Source): valeur incorrecte pour le champ de liste de sélection restreinte : Keep",
+                    "errorCode": "INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST",
+                    "fields": ["Canal_Source__c"],
+                }
+            ],
+        ),
+        _build_response(201, {"id": "500CREATE003"}),
+        _build_response(
+            200,
+            {
+                "Id": "500CREATE003",
+                "CaseNumber": "00077779",
+                "Status": "New",
+                "Priority": "High",
+            },
+        ),
+    ]
+
+    result = salesforce_provider._notify(
+        mode="create",
+        subject="Create with invalid canal source fallback",
+        description="fallback test",
+        status=IncidentStatus.FIRING.value,
+        priority=IncidentSeverity.CRITICAL.value,
+    )
+
+    assert result["case"]["id"] == "500CREATE003"
+    first_call = mock_request.call_args_list[0].kwargs
+    second_call = mock_request.call_args_list[1].kwargs
+    assert first_call["method"] == "POST"
+    assert first_call["json"]["Canal_Source__c"] == "Keep"
+    assert "Canal_Source__c" not in second_call["json"]
+    assert second_call["json"]["Origin"] == "Keep"
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_notify_create_mode_retries_without_invalid_default_origin(
+    mock_request, salesforce_provider
+):
+    mock_request.side_effect = [
+        _build_response(
+            400,
+            [
+                {
+                    "message": "Origin: bad value for restricted picklist field",
+                    "errorCode": "INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST",
+                    "fields": ["Origin"],
+                }
+            ],
+        ),
+        _build_response(201, {"id": "500CREATE004"}),
+        _build_response(
+            200,
+            {
+                "Id": "500CREATE004",
+                "CaseNumber": "00077780",
+                "Status": "New",
+                "Priority": "Medium",
+                "Canal_Source__c": "Keep",
+            },
+        ),
+    ]
+
+    result = salesforce_provider._notify(
+        mode="create",
+        subject="Create with invalid origin fallback",
+        description="origin fallback test",
+        status=IncidentStatus.FIRING.value,
+        priority=IncidentSeverity.WARNING.value,
+    )
+
+    assert result["case"]["id"] == "500CREATE004"
+    first_call = mock_request.call_args_list[0].kwargs
+    second_call = mock_request.call_args_list[1].kwargs
+    assert first_call["method"] == "POST"
+    assert first_call["json"]["Origin"] == "Keep"
+    assert "Origin" not in second_call["json"]
+    assert second_call["json"]["Canal_Source__c"] == "Keep"
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
 def test_notify_update_mode_updates_case(mock_request, salesforce_provider):
     case_payload = {
         "Id": "500UPDATE001",
@@ -321,6 +410,45 @@ def test_notify_update_mode_updates_case(mock_request, salesforce_provider):
     first_call = mock_request.call_args_list[0].kwargs
     assert first_call["method"] == "PATCH"
     assert first_call["url"].endswith("/sobjects/Case/500UPDATE001")
+
+
+@patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
+def test_notify_upsert_skips_when_status_already_synced(mock_request, salesforce_provider):
+    salesforce_provider.context_manager.incident_context = SimpleNamespace(
+        id=str(uuid.uuid4()),
+        enrichments={
+            "salesforce_case_id": "500EXISTING001",
+            "sf_last_sync_status": "acknowledged",
+        },
+    )
+    mock_request.side_effect = [
+        _build_response(
+            200,
+            {
+                "Id": "500EXISTING001",
+                "CaseNumber": "00099999",
+                "Status": "Working",
+                "Priority": "High",
+            },
+        ),
+    ]
+
+    result = salesforce_provider._notify(
+        mode="upsert",
+        keep_incident_id=str(uuid.uuid4()),
+        status=IncidentStatus.ACKNOWLEDGED.value,
+        priority=IncidentSeverity.HIGH.value,
+        subject="No-op sync",
+        description="no-op sync should not patch",
+    )
+
+    assert result["action"] == "upsert_noop"
+    assert result["existing"] is True
+    assert result["created"] is False
+    assert result["case"]["id"] == "500EXISTING001"
+    first_call = mock_request.call_args_list[0].kwargs
+    assert first_call["method"] == "GET"
+    assert first_call["url"].endswith("/sobjects/Case/500EXISTING001")
 
 
 @patch("keep.providers.salesforce_provider.salesforce_provider.requests.request")
