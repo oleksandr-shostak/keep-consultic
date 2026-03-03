@@ -16,7 +16,7 @@
 
 1. Підняти infra:
 ```bash
-docker run -d --name ollama-local -p 11434:11434 -v ollama_local_data:/root/.ollama ollama/ollama:latest
+docker run -d --name ollama-local -p 127.0.0.1:11434:11434 -v ollama_local_data:/root/.ollama ollama/ollama:latest
 docker exec -it ollama-local ollama pull qwen2.5:7b
 docker exec -it ollama-local ollama pull nomic-embed-text
 
@@ -37,7 +37,7 @@ set -a && source .env && set +a
 
 3. Health-check:
 ```bash
-curl -s http://localhost:8099/health | jq .
+curl -s http://127.0.0.1:8099/health | jq .
 ```
 
 ## API

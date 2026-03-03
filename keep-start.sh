@@ -15,13 +15,15 @@ echo "Stopping existing services..."
 pkill -f "keep api" 2>/dev/null || true
 pkill -f "npm run dev" 2>/dev/null || true
 pkill -f "next dev" 2>/dev/null || true
+pkill -f "uvicorn app.main:app.*8099" 2>/dev/null || true
 docker rm -f keep-websocket 2>/dev/null || true
 tmux kill-session -t keep 2>/dev/null || true
 
-# Kill any process on port 3000 (frontend), 8080 (backend), 6001 (soketi)
+# Kill any process on port 3000 (frontend), 8080 (backend), 6001 (soketi), 8099 (local triage)
 lsof -ti:3000 | xargs -r kill -9 2>/dev/null || true
 lsof -ti:8080 | xargs -r kill -9 2>/dev/null || true
 lsof -ti:6001 | xargs -r kill -9 2>/dev/null || true
+lsof -ti:8099 | xargs -r kill -9 2>/dev/null || true
 
 sleep 2
 
@@ -38,6 +40,21 @@ set -a
 source .env
 set +a
 echo "✓ Loaded /opt/keep/.env"
+
+# Local triage env (separate from Keep .env)
+TRIAGE_ENV_FILE="/opt/keep/local-triage-service/.env"
+TRIAGE_ENABLED=false
+TRIAGE_API_HOST_VALUE="127.0.0.1"
+TRIAGE_API_PORT_VALUE="8099"
+if [[ -f "$TRIAGE_ENV_FILE" ]]; then
+  TRIAGE_ENABLED=true
+  TRIAGE_API_PORT_VALUE="$(grep -E '^TRIAGE_API_PORT=' "$TRIAGE_ENV_FILE" | tail -n1 | cut -d= -f2- || echo "8099")"
+  TRIAGE_API_PORT_VALUE="${TRIAGE_API_PORT_VALUE:-8099}"
+  echo "✓ Found $TRIAGE_ENV_FILE"
+else
+  echo "⚠ Local triage env not found at $TRIAGE_ENV_FILE (triage UI/LLM logs will be unavailable)"
+fi
+
 # ============================================================================
 # CHECK FRONTEND .env.local EXISTS
 # ============================================================================
@@ -69,13 +86,67 @@ echo "Internal Services:"
 echo "  Backend:       http://127.0.0.1:${PORT}"
 echo "  Frontend:      http://127.0.0.1:3000"
 echo "  Soketi:        http://${PUSHER_HOST}:${PUSHER_PORT}"
+echo "  Local Triage:  http://${TRIAGE_API_HOST_VALUE}:${TRIAGE_API_PORT_VALUE}"
+echo "  Ollama API:    http://127.0.0.1:11434"
 echo "════════════════════════════════════════"
 echo ""
 
 # ============================================================================
+# ENSURE LOCAL OLLAMA CONTAINER (LOCALHOST ONLY)
+# ============================================================================
+echo "1) Ensuring local Ollama container (localhost only)..."
+OLLAMA_BIND_EXPECTED="127.0.0.1:11434"
+OLLAMA_EXISTS=false
+OLLAMA_RUNNING=false
+
+if docker ps -a --format '{{.Names}}' | grep -qx "ollama-local"; then
+  OLLAMA_EXISTS=true
+fi
+if docker ps --format '{{.Names}}' | grep -qx "ollama-local"; then
+  OLLAMA_RUNNING=true
+fi
+
+if [[ "$OLLAMA_EXISTS" == "true" ]]; then
+  OLLAMA_BIND_CURRENT="$(docker inspect -f '{{range (index .HostConfig.PortBindings "11434/tcp")}}{{.HostIp}}:{{.HostPort}}{{end}}' ollama-local 2>/dev/null || true)"
+  if [[ "$OLLAMA_BIND_CURRENT" != "$OLLAMA_BIND_EXPECTED" ]]; then
+    echo "  Recreating ollama-local to enforce localhost bind (${OLLAMA_BIND_EXPECTED})..."
+    docker rm -f ollama-local >/dev/null 2>&1 || true
+    OLLAMA_EXISTS=false
+    OLLAMA_RUNNING=false
+  fi
+fi
+
+if [[ "$OLLAMA_EXISTS" == "false" ]]; then
+  docker run -d --name ollama-local \
+    --restart unless-stopped \
+    -p 127.0.0.1:11434:11434 \
+    -v ollama_local_data:/root/.ollama \
+    -e OLLAMA_HOST=0.0.0.0:11434 \
+    ollama/ollama:latest >/dev/null
+  OLLAMA_RUNNING=true
+else
+  if [[ "$OLLAMA_RUNNING" == "false" ]]; then
+    docker start ollama-local >/dev/null
+  fi
+fi
+
+echo "Waiting for Ollama API to become ready..."
+for i in {1..30}; do
+  if curl -sS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+    echo "✓ Ollama is UP at 127.0.0.1:11434"
+    break
+  fi
+  if [[ $i -eq 30 ]]; then
+    echo "✗ Ollama failed to start after 30s"
+    exit 1
+  fi
+  sleep 1
+done
+
+# ============================================================================
 # START SOKETI (WEBSOCKET) IN DOCKER
 # ============================================================================
-echo "1) Starting Soketi WebSocket in Docker..."
+echo "2) Starting Soketi WebSocket in Docker..."
 docker run -d --rm \
   --name keep-websocket \
   -p ${PUSHER_PORT}:6001 \
@@ -109,7 +180,7 @@ fi
 # ============================================================================
 # START BACKEND IN TMUX
 # ============================================================================
-echo "2) Starting Backend in tmux..."
+echo "3) Starting Backend in tmux..."
 tmux new-session -d -s keep -n backend
 
 # Load environment and start
@@ -140,10 +211,38 @@ for i in {1..45}; do
 done
 
 # ============================================================================
+# START LOCAL TRIAGE IN TMUX (LOCALHOST ONLY)
+# ============================================================================
+if [[ "$TRIAGE_ENABLED" == "true" ]]; then
+  echo "4) Starting Local Triage in tmux (localhost only)..."
+  tmux new-window -t keep -n triage
+  tmux send-keys -t keep:triage "cd /opt/keep/local-triage-service" Enter
+  tmux send-keys -t keep:triage "set -a && source .env && set +a" Enter
+  tmux send-keys -t keep:triage "export TRIAGE_API_HOST=127.0.0.1" Enter
+  tmux send-keys -t keep:triage "/opt/keep/venv/bin/uvicorn app.main:app --host \"\${TRIAGE_API_HOST}\" --port \"\${TRIAGE_API_PORT:-8099}\" 2>&1 | tee /opt/keep/logs/local-triage-service.log" Enter
+
+  echo "Waiting for local triage to start..."
+  TRIAGE_STARTED=false
+  for i in {1..30}; do
+    if curl -sS "http://127.0.0.1:${TRIAGE_API_PORT_VALUE}/health" >/dev/null 2>&1; then
+      echo "✓ Local triage is UP at 127.0.0.1:${TRIAGE_API_PORT_VALUE}"
+      TRIAGE_STARTED=true
+      break
+    fi
+    if [[ $i -eq 30 ]]; then
+      echo "⚠ Local triage did not report ready after 30s (continuing Keep start)"
+    fi
+    sleep 1
+  done
+else
+  echo "⚠ Skipping local triage start (no env file)"
+fi
+
+# ============================================================================
 # START FRONTEND IN TMUX
 # ============================================================================
 if [[ "$BACKEND_STARTED" == "true" ]]; then
-  echo "3) Starting Frontend in tmux..."
+  echo "5) Starting Frontend in tmux..."
   # Clean .next directory before starting (do it synchronously, not in tmux)
   rm -rf /opt/keep/keep-ui/.next 2>/dev/null || true
   sleep 1
@@ -186,14 +285,15 @@ Configuration Files:
   Frontend:  /opt/keep/keep-ui/.env.local
 
 Tmux Commands:
-  Ctrl+B then 0  → Backend window
-  Ctrl+B then 1  → Frontend window
-  Ctrl+B then 2  → This monitor
+  Ctrl+B then w  → List windows
+  Ctrl+B then n  → Next window
+  Ctrl+B then p  → Previous window
   Ctrl+B then d  → Detach (keeps running)
   Ctrl+C         → Stop current process
 
 Logs:
   tail -f /opt/keep/logs/backend.log
+  tail -f /opt/keep/logs/local-triage-service.log
   tail -f /opt/keep/logs/frontend.log
 
 ════════════════════════════════════════
@@ -241,6 +341,26 @@ if timeout 3 bash -c "</dev/tcp/${PUSHER_HOST}/${PUSHER_PORT}" >/dev/null 2>&1; 
   echo "✓ Reachable"
 else
   echo "✗ Not reachable"
+fi
+
+# Ollama
+echo -n "Ollama (127.0.0.1:11434): "
+if curl -sS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+  echo "✓ OK"
+else
+  echo "✗ FAIL"
+fi
+
+# Local triage
+echo -n "Local Triage (${TRIAGE_API_PORT_VALUE}): "
+if [[ "$TRIAGE_ENABLED" == "true" ]]; then
+  if curl -sS "http://127.0.0.1:${TRIAGE_API_PORT_VALUE}/health" >/dev/null 2>&1; then
+    echo "✓ OK"
+  else
+    echo "✗ FAIL"
+  fi
+else
+  echo "⚠ Disabled (missing local-triage-service/.env)"
 fi
 
 # Tmux
